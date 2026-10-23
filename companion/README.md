@@ -1,16 +1,16 @@
 # Term50 豆包语音 Companion
 
-手机录音经 TLS-PSK 发送到 Mac，Mac 将 PCM 实时送入已有的 `Doubao Stream Bridge` 虚拟麦克风，并使用豆包输入法识别。整个实现位于 Term50 仓库，不修改原 `doubao-stream-bridge` 工具，不读取豆包账号凭证。
+手机录音经 TLS-PSK 发送到 Mac，Mac 将 PCM 实时送入已有的 `Doubao Stream Bridge` 虚拟麦克风，并使用豆包输入法识别。独立桥接工具的[源码](doubao-stream-bridge/README.md)也已收录在本仓库；Term50 使用本目录自己的接收与路由实现，不修改独立工具的运行状态或读取豆包账号凭证。
 
 ## 开发机准备
 
-在 macOS 已登录、未锁屏的图形桌面上运行。需要 Xcode Command Line Tools（提供 `swiftc` 和 `codesign`）、已登录的 Mac 豆包输入法，以及事先按原 `doubao-stream-bridge` 项目说明安装的 `Doubao Stream Bridge` 虚拟音频设备和 Python 虚拟环境。该环境的 `.venv/bin/python` 需要支持 TLS-PSK（Python 3.13 或更新版本，且 OpenSSL 提供 `PSK-AES256-GCM-SHA384`）并能导入 `sounddevice`/PortAudio；虚拟设备须支持 48 kHz、双声道、16-bit 输出。`build.sh` 在本目录构建接收窗口和麦克风切换工具，并临时签名接收窗口 App。Mac 的辅助功能授权应授予实际启动这些组件的进程；后台服务可能需要单独授权。
+在 macOS 已登录、未锁屏的图形桌面上运行。需要 Xcode Command Line Tools（提供 `swiftc` 和 `codesign`）、已登录的 Mac 豆包输入法，以及先按[独立桥接指南](doubao-stream-bridge/README.md)创建的 `Doubao Stream Bridge` 虚拟音频设备和 Python 虚拟环境。该环境的 `.venv/bin/python` 需要支持 TLS-PSK（Python 3.13 或更新版本，且 OpenSSL 提供 `PSK-AES256-GCM-SHA384`）并能导入 `sounddevice`/PortAudio；虚拟设备须支持 48 kHz、双声道、16-bit 输出。`build.sh` 在本目录构建接收窗口和麦克风切换工具，并临时签名接收窗口 App。Mac 的辅助功能授权应授予实际启动这些组件的进程；后台服务可能需要单独授权。
 
-以下命令从 Term50 仓库根目录开始。先把两个示例变量改为**本机的实际桥接目录和 Mac 可达的 IP 地址**；不要把个人目录、设备地址或配对密钥写进仓库。手机地址字段只接受 IPv4/IPv6 字面地址。`run.sh` 使用 `TERM50_DOUBAO_BRIDGE_DIR` 寻找桥接环境；直接运行 `server.py` 时也可传 `--bridge-dir`。
+以下命令从 Term50 仓库根目录开始。先按上面的指南创建 `companion/doubao-stream-bridge/.venv`，再把示例地址改为 **Mac 可达的 IP 地址**；不要把个人目录、设备地址或配对密钥写进仓库。手机地址字段只接受 IPv4/IPv6 字面地址。`run.sh` 使用 `TERM50_DOUBAO_BRIDGE_DIR` 寻找桥接环境；直接运行 `server.py` 时也可传 `--bridge-dir`。
 
 ```sh
+export TERM50_DOUBAO_BRIDGE_DIR="$PWD/companion/doubao-stream-bridge"
 cd companion
-export TERM50_DOUBAO_BRIDGE_DIR='/path/to/doubao-stream-bridge'
 export TERM50_MAC_IP='<Mac 当前可达的 IP 地址>'
 zsh build.sh
 zsh run.sh --check

@@ -1,5 +1,7 @@
 # Term50 · BlackBerry Q20 定制版
 
+**语言：** 简体中文 · [English](README.en.md)
+
 本仓库 fork 自 [acmiyaguchi/Term50](https://github.com/acmiyaguchi/Term50)，围绕 BlackBerry Classic（Q20）的实体键盘、中文终端、Shell 操作和语音输入继续开发。语音通过 Mac 上的豆包输入法完成识别；手机保留可编辑草稿，由用户决定何时插入终端。
 
 [界面预览](#界面预览) · [定制功能](#定制功能) · [安装与使用](#安装与使用) · [语音配置](#语音配置) · [开发与文档](#开发与文档)
@@ -37,11 +39,14 @@
 
 ## 语音配置
 
-语音识别需要一台**已登录且未锁屏的 Mac**，其上已安装并登录豆包输入法，且已按外部 `doubao-stream-bridge` 项目的说明准备虚拟音频设备和 Python 环境。该桥接项目不在本仓库；必须先备齐它的 `.venv/bin/python` 和 `Doubao Stream Bridge` 虚拟设备，Companion 才能运行。Companion 不随手机 BAR 自动启动。先在 Mac 上从仓库根目录执行，替换示例目录和地址：
+语音识别需要一台**已登录且未锁屏的 Mac**，其上已安装并登录豆包输入法。仓库包含[独立桥接工具源码](companion/doubao-stream-bridge/README.md)和 Term50 Companion，但不包含 Python 虚拟环境、Loopback 应用或本机的 `Doubao Stream Bridge` 虚拟设备。先按独立桥接指南准备该设备，再在 Mac 上从仓库根目录执行；`python3` 须为支持 TLS-PSK 的 3.13 或更新版本：
 
 ```sh
+python3 -c 'import ssl, sys; assert sys.version_info >= (3, 13) and hasattr(ssl.SSLContext, "set_psk_server_callback")'
+export TERM50_DOUBAO_BRIDGE_DIR="$PWD/companion/doubao-stream-bridge"
+python3 -m venv "$TERM50_DOUBAO_BRIDGE_DIR/.venv"
+"$TERM50_DOUBAO_BRIDGE_DIR/.venv/bin/python" -m pip install -r "$TERM50_DOUBAO_BRIDGE_DIR/requirements.txt"
 cd companion
-export TERM50_DOUBAO_BRIDGE_DIR='/absolute/path/to/doubao-stream-bridge'
 export TERM50_MAC_IP='<Mac 可达的 IP 地址>'
 zsh build.sh
 zsh run.sh --check

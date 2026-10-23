@@ -60,7 +60,7 @@ flowchart LR
 | `companion/MicRoute.swift` / `MicRouteController.swift` | 有界等待豆包设置与设备列表就绪，每个路由修改仅点击一次，再确认已选麦克风 |
 | `companion/Receiver.swift` | 独立接收窗口，捕获组字/提交/撤销组字及定时快照，选择和恢复输入法，维持录音快捷键与心跳租约 |
 
-原 `doubao-stream-bridge` 的源码、配置、运行日志和备份均不复制或改写。Companion 在原会话锁存在时与其协作，避免同时操作同一输入法。
+独立 `doubao-stream-bridge` 的[可公开源码](../companion/doubao-stream-bridge/README.md)已纳入仓库，配置、运行日志、音频和备份仍只保留本机。Companion 使用自己的接收与路由实现，在独立工具的会话锁存在时拒绝抢占，避免同时操作同一输入法。
 
 ## 状态与文本所有权
 
