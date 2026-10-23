@@ -107,6 +107,13 @@ void platform_set_idle_timeout(platform_t *p, int ms) {
 	}
 }
 
+int platform_set_screen_awake(platform_t *p, int awake) {
+	if (p == NULL || p->ops->set_screen_awake == NULL) {
+		return -1;
+	}
+	return p->ops->set_screen_awake(p, awake != 0);
+}
+
 void platform_apply_pending_resize(platform_t *p) {
 	if (p != NULL && p->ops->apply_pending_resize != NULL) {
 		p->ops->apply_pending_resize(p);

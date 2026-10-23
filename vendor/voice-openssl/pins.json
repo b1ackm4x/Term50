@@ -1,0 +1,23 @@
+{
+  "version": "3.5.4",
+  "source_url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz",
+  "source_sha256": "967311f84955316969bdb1d8d4b983718ef42338639c621ec4c34fddef355e99",
+  "source_nix_sha256": "16ay6ppxsky3qhg6573370iz93kihfwx9n5ipmlnjcam97w12wwn",
+  "configure": [
+    "linux-generic32",
+    "--prefix=/term50/voice-openssl",
+    "--libdir=lib",
+    "--openssldir=/accounts/1000/shared/misc/ssl",
+    "no-asm",
+    "no-tests",
+    "no-engine",
+    "no-dso",
+    "no-async",
+    "threads",
+    "-lsocket"
+  ],
+  "runtime_sha256": {
+    "libssl.so.3": "d47e8c827ff23d0657feb0cb68fc5b10496bb54d8ee151fef855131186582154",
+    "libcrypto.so.3": "3f5e107eadf8f75fdf8d6fc28019cf52be98cc131639cbe103e012220ad65d01"
+  }
+}

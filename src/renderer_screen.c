@@ -24,6 +24,7 @@ typedef struct glyph_cache_entry {
 	uint32_t     fg_key;
 	uint32_t     bg_key;
 	font_style_t style;
+	int cell_w, cell_h;
 	bitmap_t    *bm;
 } glyph_cache_entry_t;
 
@@ -44,6 +45,9 @@ typedef struct glyph_cache {
 typedef struct known_buffer {
 	screen_buffer_t buf;
 	int             fresh;
+	uint64_t        base_generation;
+	rect_t          overlays[4];
+	int             overlay_count;
 } known_buffer_t;
 
 /* Bounding box of pixels touched between begin_frame and end_frame.
@@ -60,6 +64,9 @@ typedef struct renderer_screen {
 	screen_context_t  ctx;
 	screen_window_t   window;
 	bitmap_t          fb;          /* view over the active buffer */
+	bitmap_t         *base;        /* terminal underlay, never contains UI */
+	uint64_t          base_generation;
+	int               tracking_overlay;
 	int               fb_valid;
 	int               fb_w;
 	int               fb_h;
@@ -126,13 +133,14 @@ static void glyph_cache_clear(glyph_cache_t *c) {
 
 static const bitmap_t *glyph_cache_lookup(renderer_screen_t *self,
                                           uint32_t codepoint, font_style_t style,
-                                          rgb_t fg, rgb_t bg) {
+                                          rgb_t fg, rgb_t bg, int cell_w, int cell_h) {
 	uint32_t fg_key = color_key(fg);
 	uint32_t bg_key = color_key(bg);
 	unsigned idx = glyph_hash(codepoint, style, fg_key, bg_key);
 	glyph_cache_entry_t *entry = &self->cache.entries[idx];
 
 	if (entry->bm != NULL && entry->codepoint == codepoint &&
+	    entry->cell_w == cell_w && entry->cell_h == cell_h &&
 	    entry->style == style && entry->fg_key == fg_key && entry->bg_key == bg_key) {
 		return entry->bm;
 	}
@@ -141,10 +149,11 @@ static const bitmap_t *glyph_cache_lookup(renderer_screen_t *self,
 		bitmap_free(entry->bm);
 		entry->bm = NULL;
 	}
-	entry->bm = font_render_glyph_shaded(self->font, codepoint, style, fg, bg);
+	entry->bm = font_render_glyph_cell(self->font, codepoint, style, fg, bg, cell_w, cell_h);
 	if (entry->bm == NULL) {
 		return NULL;
 	}
+	entry->cell_w = cell_w; entry->cell_h = cell_h;
 	entry->codepoint = codepoint;
 	entry->style     = style;
 	entry->fg_key    = fg_key;
@@ -213,6 +222,7 @@ static int latch_framebuffer(renderer_screen_t *self) {
 			 * will recover on the next set-change reset. */
 			idx = 0;
 		}
+		memset(&self->known[idx], 0, sizeof(self->known[idx]));
 		self->known[idx].buf   = buffer;
 		self->known[idx].fresh = 0;
 	}
@@ -258,11 +268,54 @@ static int screen_begin_frame(renderer_t *r) {
 		return 0;
 	}
 	bbox_reset(&self->dirty);
+	self->tracking_overlay = 0;
 	/* A failed latch leaves current_stale set, so the caller still
 	 * picks "force full" — the safer default when we couldn't even
 	 * read the buffer. */
 	latch_framebuffer(self);
 	return self->current_stale ? 1 : 0;
+}
+
+int renderer_screen_capture_base(renderer_t *r) {
+	renderer_screen_t *self = self_of(r);
+	if (!self || !self->fb_valid) return 0;
+	if (self->base && (self->base->w != self->fb_w || self->base->h != self->fb_h)) {
+		bitmap_free(self->base);
+		self->base = NULL;
+	}
+	if (!self->base) self->base = bitmap_alloc(self->fb_w, self->fb_h, BITMAP_FMT_RGBA8888);
+	if (!self->base) return 0;
+	bitmap_blit(self->base, 0, 0, &self->fb);
+	self->base_generation++;
+	known_buffer_t *buffer = &self->known[self->current_idx];
+	buffer->base_generation = self->base_generation;
+	buffer->overlay_count = 0;
+	self->tracking_overlay = 1;
+	return 1;
+}
+
+int renderer_screen_restore_base(renderer_t *r) {
+	renderer_screen_t *self = self_of(r);
+	if (!self || !self->fb_valid || !self->base ||
+	    self->base->w != self->fb_w || self->base->h != self->fb_h) return 0;
+	known_buffer_t *buffer = &self->known[self->current_idx];
+	if (buffer->base_generation != self->base_generation) {
+		/* Refresh the entire buffer only when the terminal has changed.
+		 * Later animation frames erase only this buffer's previous UI. */
+		bitmap_blit(&self->fb, 0, 0, self->base);
+		bbox_extend(&self->dirty, 0, 0, self->fb_w, self->fb_h, self->fb_w, self->fb_h);
+	} else for (int i = 0; i < buffer->overlay_count; ++i) {
+		rect_t box = buffer->overlays[i];
+		bitmap_t view;
+		bitmap_view(&view, self->base->pixels + (size_t)box.y * self->base->stride + box.x * 4,
+		            box.w, box.h, self->base->stride, BITMAP_FMT_RGBA8888);
+		bitmap_blit(&self->fb, box.x, box.y, &view);
+		bbox_extend(&self->dirty, box.x, box.y, box.w, box.h, self->fb_w, self->fb_h);
+	}
+	buffer->base_generation = self->base_generation;
+	buffer->overlay_count = 0;
+	self->tracking_overlay = 1;
+	return 1;
 }
 
 static void screen_end_frame(renderer_t *r, int was_full) {
@@ -331,12 +384,12 @@ static void screen_fill_rect(renderer_t *r, const rect_t *dst, rgb_t color) {
 
 static int screen_draw_glyph(renderer_t *r, int x, int y,
                               uint32_t codepoint, font_style_t style,
-                              rgb_t fg, rgb_t bg) {
+                              rgb_t fg, rgb_t bg, int cell_w, int cell_h) {
 	renderer_screen_t *self = self_of(r);
 	if (self == NULL || !self->fb_valid || self->font == NULL) {
 		return -1;
 	}
-	const bitmap_t *bm = glyph_cache_lookup(self, codepoint, style, fg, bg);
+	const bitmap_t *bm = glyph_cache_lookup(self, codepoint, style, fg, bg, cell_w, cell_h);
 	if (bm == NULL) {
 		return -1;
 	}
@@ -352,6 +405,28 @@ static void screen_draw_bitmap(renderer_t *r, int x, int y, const bitmap_t *src)
 	}
 	bitmap_blit(&self->fb, x, y, src);
 	bbox_extend(&self->dirty, x, y, src->w, src->h, self->fb_w, self->fb_h);
+}
+
+static void screen_blend_bitmap(renderer_t *r,int x,int y,const bitmap_t *src) {
+	renderer_screen_t *self=self_of(r);
+	if(!self||!self->fb_valid||!src)return;
+	bitmap_blend(&self->fb,x,y,src);
+	bbox_extend(&self->dirty,x,y,src->w,src->h,self->fb_w,self->fb_h);
+	if (self->tracking_overlay) {
+		int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+		int x1 = x + src->w, y1 = y + src->h;
+		if (x1 > self->fb_w) x1 = self->fb_w;
+		if (y1 > self->fb_h) y1 = self->fb_h;
+		if (x1 > x0 && y1 > y0) {
+			known_buffer_t *buffer = &self->known[self->current_idx];
+			if (buffer->overlay_count < 4)
+				buffer->overlays[buffer->overlay_count++] = (rect_t){x0,y0,x1-x0,y1-y0};
+			else { /* Safe fallback for future UIs with more drawing regions. */
+				buffer->overlays[0] = (rect_t){0,0,self->fb_w,self->fb_h};
+				buffer->overlay_count = 1;
+			}
+		}
+	}
 }
 
 static void screen_set_font(renderer_t *r, font_t *font) {
@@ -460,6 +535,7 @@ static void screen_destroy(renderer_t *r) {
 	}
 	destroy_symmenus(self);
 	glyph_cache_clear(&self->cache);
+	bitmap_free(self->base);
 	free(self);
 }
 
@@ -474,6 +550,7 @@ static const renderer_ops_t SCREEN_RENDERER_OPS = {
 	.fill_rect           = screen_fill_rect,
 	.draw_glyph          = screen_draw_glyph,
 	.draw_bitmap         = screen_draw_bitmap,
+	.blend_bitmap        = screen_blend_bitmap,
 	.symmenu_surface_for = screen_symmenu_surface_for,
 	.symmenu_height      = screen_symmenu_height,
 };

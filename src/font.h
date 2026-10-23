@@ -27,6 +27,12 @@ void font_library_quit(void);
 
 font_t *font_open(const char *path, int pt_size);
 void    font_close(font_t *f);
+/* Fallback is opt-in and leaves primary metrics and cmap discovery intact. */
+int font_add_fallback(font_t *f, const char *path);
+int font_enable_system_fallback(font_t *f);
+bitmap_t *font_render_glyph_cell(font_t *f, uint32_t codepoint,
+                                 font_style_t style, rgb_t fg, rgb_t bg,
+                                 int cell_w, int cell_h);
 
 /* Pixel advance for a line of text. Mirrors TTF_FontLineSkip. */
 int font_line_skip(const font_t *f);

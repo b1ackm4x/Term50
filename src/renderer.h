@@ -35,8 +35,9 @@ typedef struct renderer_ops {
 	void (*fill_rect)(renderer_t *r, const rect_t *dst, rgb_t color);
 	int  (*draw_glyph)(renderer_t *r, int x, int y,
 	                   uint32_t codepoint, font_style_t style,
-	                   rgb_t fg, rgb_t bg);
+	                   rgb_t fg, rgb_t bg, int cell_w, int cell_h);
 	void (*draw_bitmap)(renderer_t *r, int x, int y, const bitmap_t *src);
+	void (*blend_bitmap)(renderer_t *r, int x, int y, const bitmap_t *src);
 
 	/* symmenu accessors */
 	const bitmap_t *(*symmenu_surface_for)(renderer_t *r, symmenu_t *menu);
@@ -58,7 +59,11 @@ void  renderer_fill_rect(renderer_t *r, const rect_t *dst, rgb_t color);
 int   renderer_draw_glyph(renderer_t *r, int x, int y,
                           uint32_t codepoint, font_style_t style,
                           rgb_t fg, rgb_t bg);
+int renderer_draw_cell_glyph(renderer_t *r, int x, int y,
+                             uint32_t cp, font_style_t style, rgb_t fg, rgb_t bg,
+                             int cell_w, int cell_h);
 void  renderer_draw_bitmap(renderer_t *r, int x, int y, const bitmap_t *src);
+void  renderer_blend_bitmap(renderer_t *r, int x, int y, const bitmap_t *src);
 const bitmap_t *renderer_symmenu_surface_for(renderer_t *r, symmenu_t *menu);
 int   renderer_symmenu_height(renderer_t *r, symmenu_t *menu);
 void  renderer_destroy(renderer_t *r);

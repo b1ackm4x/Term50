@@ -31,6 +31,14 @@ static int is_terminfo_name(const char *value) {
 }
 
 static int parse_builtin(const char *value, builtin_action_t *out) {
+	if (!strcmp(value,"profile_terminal")) { *out=TERM_BUILTIN_PROFILE_TERMINAL; return 1; }
+	if (!strcmp(value,"profile_claude")) { *out=TERM_BUILTIN_PROFILE_CLAUDE; return 1; }
+	if (!strcmp(value,"profile_tty")) { *out=TERM_BUILTIN_PROFILE_TTY; return 1; }
+	if (!strcmp(value,"quick_actions")) { *out=TERM_BUILTIN_QUICK_ACTIONS; return 1; }
+	if (!strcmp(value,"settings_open")) { *out=TERM_BUILTIN_SETTINGS_OPEN; return 1; }
+	if (strcmp(value, "mode_normal") == 0) { *out = TERM_BUILTIN_MODE_NORMAL; return 1; }
+	if (strcmp(value, "mode_insert") == 0) { *out = TERM_BUILTIN_MODE_INSERT; return 1; }
+	if (strcmp(value, "mode_toggle") == 0) { *out = TERM_BUILTIN_MODE_TOGGLE; return 1; }
 	if (strcmp(value, "alt_down") == 0) {
 		*out = TERM_BUILTIN_ALT_DOWN;
 		return 1;

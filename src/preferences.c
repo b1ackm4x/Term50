@@ -42,7 +42,7 @@
 #define PREFS_COLOR_NUM_ELEMENTS 3
 #define PREFS_SYMKEYS_DEFAULT_NUM_ROWS 2
 
-static const int PREFS_VERSION = 10;
+static const int PREFS_VERSION = 12;
 
 #define DEFAULT_FONT_PATH TERM_DEFAULT_FONT_PATH
 #define DEFAULT_FONT_SIZE TERM_DEFAULT_FONT_SIZE
@@ -59,6 +59,12 @@ static const int PREFS_VERSION = 10;
 #define DEFAULT_TTY_ENCODING "UTF-8"
 /* One metamode table; `sticky` entries keep metamode armed after firing (the
  * former metamode_sticky_keys), the rest exit it (former keys + func_keys). */
+#define DEFAULT_NORMAL_KEYS_LEN 2
+#define DEFAULT_NORMAL_KEYS (keymap_t[]){{'i', "mode_insert"}, {'?', "help_overlay"}}
+#define DEFAULT_TERMINAL_KEYS_LEN 10
+#define DEFAULT_TERMINAL_KEYS (keymap_t[]){{'i',"kcuu1"},{'j',"kcub1"}, \
+    {'k',"kcud1"},{'l',"kcuf1"},{'h',"tab_prev"},{'n',"tab_new"}, \
+    {'?',"help_overlay"},{'x',"\x03"},{'v',"paste_clipboard"},{'r',"\x12"}}
 #define DEFAULT_METAMODE_KEYS_LEN 17
 #define DEFAULT_METAMODE_KEYS (keymap_t[]){{'e', "\x1b"}, \
                                            {'s', "rescreen"}, \
@@ -279,13 +285,30 @@ static int lua_pairs_valid(lua_State *L, int allow_unbind) {
  * its key name). Assumes `from` is unique within `def` (it is for every
  * shipped table). STACK: the table stays at -1; the caller owns/pops it. */
 static keymap_t *lua_keymap_merge(lua_State *L, const keymap_t *def,
-                                  size_t def_len) {
+                                  size_t def_len, int normal) {
 	if (!lua_pairs_valid(L, 1)) {        /* 1: accept { "x", false } unbind */
 		return NULL;
 	}
 	size_t un = (size_t)lua_rawlen(L, -1);
+	if (normal) {
+		for (size_t i = 1; i <= un; ++i) {
+			const char *f, *t;
+			int unbind;
+			lua_pair_at(L, (int)i, &f, &t, NULL, &unbind);
+			int valid = f[1] == '\0' && (unsigned char)f[0] < 128;
+			lua_getfield(L, -1, "next_mode");
+			valid = valid && (lua_isnil(L, -1) || (lua_type(L, -1) == LUA_TSTRING &&
+			        (!strcmp(lua_tostring(L, -1), "insert") || !strcmp(lua_tostring(L, -1), "normal"))));
+			lua_pop(L, 1);
+			lua_getfield(L, -1, "label");
+			valid = valid && (lua_isnil(L, -1) || lua_type(L, -1) == LUA_TSTRING);
+			lua_pop(L, 2);
+			if (!valid) return NULL;
+		}
+	}
 	/* worst case: every default kept plus every user entry appended. */
 	keymap_t *result = calloc(def_len + un + 1, sizeof(keymap_t));
+	if (!result) return NULL;
 	size_t n = 0;
 	for (size_t i = 0; i < def_len; ++i) {       /* seed with defaults */
 		result[n].from = def[i].from;
@@ -306,12 +329,16 @@ static keymap_t *lua_keymap_merge(lua_State *L, const keymap_t *def,
 		if (unbind) {
 			if (found) {
 				free(result[j].to);
+				free(result[j].label);
+				result[j].label = NULL;
 				memmove(&result[j], &result[j + 1],
 				        (n - j - 1) * sizeof(keymap_t));
-				--n;
+				result[--n] = (keymap_t){0};
 			}
 		} else if (found) {
 			free(result[j].to);
+			free(result[j].label);
+			result[j].label = NULL;
 			result[j].sticky = sticky;
 			keymap_set_to(&result[j], t);
 		} else {
@@ -319,6 +346,17 @@ static keymap_t *lua_keymap_merge(lua_State *L, const keymap_t *def,
 			result[n].sticky = sticky;
 			keymap_set_to(&result[n], t);
 			++n;
+		}
+		if (normal && !unbind) {
+			keymap_t *entry = &result[found ? j : n - 1];
+			entry->next_mode = 0;
+			lua_getfield(L, -1, "next_mode");
+			if (lua_type(L, -1) == LUA_TSTRING)
+				entry->next_mode = !strcmp(lua_tostring(L, -1), "insert") ? 1 : 2;
+			lua_pop(L, 1);
+			lua_getfield(L, -1, "label");
+			if (lua_type(L, -1) == LUA_TSTRING) entry->label = strdup(lua_tostring(L, -1));
+			lua_pop(L, 1);
 		}
 		lua_pop(L, 1);                       /* pop the pair */
 	}
@@ -438,7 +476,8 @@ static hitbox_t *lua_create_hitbox(lua_State *L, const char *key, hitbox_t def) 
 static keymap_t *lua_create_keymap_array(lua_State *L, const char *key,
                                          size_t def_len, const keymap_t *def) {
 	if (lua_get_table(L, key)) {
-		keymap_t *result = lua_keymap_merge(L, def, def_len);
+		keymap_t *result = lua_keymap_merge(L, def, def_len,
+		    strcmp(key, "normal_keys") == 0 || strcmp(key, "terminal_keys") == 0);
 		lua_pop(L, 1);                       /* pop the global table */
 		if (result != NULL) {
 			return result;
@@ -778,6 +817,13 @@ void destroy_preferences_members(pref_t *pref) {
 	while (m->to != NULL) { free(m->to); ++m; }
 	free(pref->metamode_keys);
 
+	m = pref->normal_keys;
+	while (m && m->to) { free(m->to); free(m->label); ++m; }
+	free(pref->normal_keys);
+	m = pref->terminal_keys;
+	while (m && m->to) { free(m->to); free(m->label); ++m; }
+	free(pref->terminal_keys);
+
 	destroy_symmenu(pref->main_symmenu);
 	for (int i = 0; i < 26; ++i) {
 		destroy_symmenu(pref->accent_menus[i][0]);
@@ -837,6 +883,7 @@ static const prefs_scalar_desc PREFS_SCALARS[] = {
 	{ "sticky_alt_key",           PS_BOOL,   offsetof(pref_t, sticky_alt_key),           DEFAULT_STICKY_ALT_KEY,         NULL },
 	{ "rescreen_for_symmenu",     PS_BOOL,   offsetof(pref_t, rescreen_for_symmenu),     DEFAULT_RESCREEN_FOR_SYMMENU,   NULL },
 	{ "keyhold_accents",          PS_BOOL,   offsetof(pref_t, keyhold_accents),          DEFAULT_KEYHOLD_ACCENTS,        NULL },
+	{ "normal_insert_hold_enabled", PS_BOOL, offsetof(pref_t, normal_insert_hold_enabled), 1, NULL },
 	{ "show_help_on_startup",     PS_BOOL,   offsetof(pref_t, show_help_on_startup),     DEFAULT_SHOW_HELP_ON_STARTUP,   NULL },
 };
 
@@ -869,6 +916,20 @@ static void lua_read_scalars(lua_State *L, pref_t *prefs) {
  * defaults of the old libconfig path exactly. */
 static void prefs_build_from_lua(lua_State *L, pref_t *prefs) {
 	lua_read_scalars(L, prefs);
+	prefs->default_input_mode = TERM_INPUT_INSERT;
+	lua_getglobal(L, "default_input_mode");
+	if (lua_type(L, -1) == LUA_TSTRING && !strcmp(lua_tostring(L, -1), "normal"))
+		prefs->default_input_mode = TERM_INPUT_NORMAL;
+	lua_pop(L, 1);
+	prefs->normal_insert_hold_key = KEYCODE_SPACE;
+	lua_getglobal(L, "normal_insert_hold_key");
+	if (lua_type(L, -1) == LUA_TSTRING) {
+		int key = chord_keycode_for(lua_tostring(L, -1));
+		if (key) prefs->normal_insert_hold_key = key;
+	}
+	lua_pop(L, 1);
+	prefs->normal_keys = lua_create_keymap_array(L, "normal_keys", DEFAULT_NORMAL_KEYS_LEN, DEFAULT_NORMAL_KEYS);
+	prefs->terminal_keys = lua_create_keymap_array(L, "terminal_keys", DEFAULT_TERMINAL_KEYS_LEN, DEFAULT_TERMINAL_KEYS);
 
 	/* The version the file declares (0 if absent/non-numeric), kept so
 	 * the startup path can detect a config that predates the current
@@ -909,7 +970,7 @@ int is_int_member(int const* list, int target) {
 }
 
 keymap_t* keymap_lookup(char keystroke, keymap_t *keymap_head) {
-	while (keymap_head->to != NULL) {
+	while (keymap_head != NULL && keymap_head->to != NULL) {
 		if (keymap_head->from == keystroke) {
 			return keymap_head;
 		}
@@ -1296,7 +1357,10 @@ static void lua_emit_keymap(FILE *f, const char *key, const keymap_t *km) {
 		lua_emit_qstr(f, from);
 		fputs(", ", f);
 		lua_emit_qstr(f, km->to);
-		fputs(km->sticky ? ", sticky = true },\n" : " },\n", f);
+		if (km->sticky) fputs(", sticky = true", f);
+		if (km->next_mode) fprintf(f, ", next_mode = \"%s\"", km->next_mode == 1 ? "insert" : "normal");
+		if (km->label) { fputs(", label = ", f); lua_emit_qstr(f, km->label); }
+		fputs(" },\n", f);
 	}
 	fputs("}\n\n", f);
 }
@@ -1412,7 +1476,7 @@ void prefs_emit_lua_stub(const char *path) {
 	      "-- overlay always lists the live, effective bindings -- it is the\n"
 	      "-- source of truth, not this file.\n"
 	      "--\n"
-	      "-- The keybinding tables (metamode_keys, chord_bindings,\n"
+	      "-- The keybinding tables (normal_keys, metamode_keys, chord_bindings,\n"
 	      "-- altsym_entries) MERGE over the defaults, so list only what you\n"
 	      "-- change. Rebind a key by listing it again; remove a default with\n"
 	      "-- false, e.g.\n"
@@ -1483,6 +1547,23 @@ void prefs_emit_lua(const pref_t *prefs, const char *path) {
 		fprintf(f, "%s %d", i ? "," : "", prefs->keyhold_actions_exempt[i]);
 	}
 	fputs(" }\n\n", f);
+
+	fputs("-- Modal input is per tab. Reload changes defaults only for NEW tabs.\n"
+	      "-- NORMAL ignores unbound text; Enter/Esc/navigation/Ctrl still operate the terminal.\n", f);
+	fprintf(f, "default_input_mode = \"%s\"\n", prefs->default_input_mode == TERM_INPUT_NORMAL ? "normal" : "insert");
+	char hold_buf[2];
+	fputs("normal_insert_hold_key = ", f);
+	lua_emit_qstr(f, chord_keyname(prefs->normal_insert_hold_key, hold_buf));
+	fputs("\n-- Hold uses the first repeat, never emits Space or Backspace.\n"
+	      "-- normal_keys merge like metamode_keys; false removes a binding.\n"
+	      "-- Optional label and next_mode = \"insert\" / \"normal\".\n"
+	      "-- next_mode applies to the originating tab only after success.\n"
+	      "-- mode_normal / mode_insert / mode_toggle also work via term.action\n"
+	      "-- and termctl action. Override Shift+Sym in your config to opt in:\n"
+	      "-- chord_bindings = {{key=\"sym\", mods={\"shift\"}, action=\"mode_toggle\"}}\n", f);
+	lua_emit_keymap(f, "normal_keys", prefs->normal_keys);
+	fputs("-- Terminal profile has its own generic bindings. Claude profile uses normal_keys.\n", f);
+	lua_emit_keymap(f, "terminal_keys", prefs->terminal_keys);
 
 	fputs("-- metamode_keys: tap the metamode key, then one of these. An entry\n"
 	      "-- exits metamode after firing unless it sets sticky = true (which\n"

@@ -57,6 +57,14 @@ typedef enum builtin_action {
 	/* enter the foot-style URL picker over the active session's
 	 * visible grid; no-op when nothing matches. */
 	TERM_BUILTIN_URL_PICK,
+	TERM_BUILTIN_MODE_NORMAL,
+	TERM_BUILTIN_MODE_INSERT,
+	TERM_BUILTIN_MODE_TOGGLE,
+	TERM_BUILTIN_PROFILE_TERMINAL,
+	TERM_BUILTIN_PROFILE_CLAUDE,
+	TERM_BUILTIN_PROFILE_TTY,
+	TERM_BUILTIN_QUICK_ACTIONS,
+	TERM_BUILTIN_SETTINGS_OPEN,
 } builtin_action_t;
 
 typedef struct action {

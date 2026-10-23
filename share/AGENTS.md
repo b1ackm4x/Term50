@@ -3,8 +3,7 @@
 Term50 is a native terminal emulator on BlackBerry 10 (QNX). You are most
 likely reading this from inside a shell running in a Term50 tab. This file is
 the machine-oriented summary of how to drive and integrate with Term50; the
-human-facing version is the "Cross-app invoke" and scripting sections of the
-project README.
+human-facing entry point is the project README's Documentation table.
 
 Its absolute on-device path is exported as `$TERMCTL_AGENT_DOC`, so
 `cat "$TERMCTL_AGENT_DOC"` always finds it.
@@ -87,3 +86,14 @@ the URI — the one built-in producer of a `term://` invocation (everything else
 is a consumer: another app, a link, a shortcut):
 
     termctl notify --id return --body "back to build" --uri term://tab/2
+
+## Per-tab input modes
+
+`termctl action mode_normal`, `mode_insert`, and `mode_toggle` operate on the
+active tab. The same names work in `term.action(...)`, `normal_keys` and chords.
+NORMAL consumes unbound printable input. Enter, Escape, editing/navigation keys
+and ASCII Ctrl combinations still reach the PTY and keep the mode NORMAL;
+explicit chords take priority. Q20 Shift -> Alt -> c sends Ctrl-C in either mode.
+Explicit control-socket send operations also write to the PTY. Existing configs
+default to INSERT. Reload preserves existing tab modes. See
+`term.lua.modal-example` for an optional workflow and an explicit Escape chord.

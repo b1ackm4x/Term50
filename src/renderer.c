@@ -86,13 +86,17 @@ int renderer_draw_glyph(renderer_t *r, int x, int y,
 	if (r == NULL || r->ops->draw_glyph == NULL) {
 		return -1;
 	}
-	return r->ops->draw_glyph(r, x, y, codepoint, style, fg, bg);
+	return r->ops->draw_glyph(r, x, y, codepoint, style, fg, bg, 0, 0);
 }
 
 void renderer_draw_bitmap(renderer_t *r, int x, int y, const bitmap_t *src) {
 	if (r != NULL && r->ops->draw_bitmap != NULL) {
 		r->ops->draw_bitmap(r, x, y, src);
 	}
+}
+
+void renderer_blend_bitmap(renderer_t *r, int x, int y, const bitmap_t *src) {
+	if (r && r->ops->blend_bitmap) r->ops->blend_bitmap(r,x,y,src);
 }
 
 const bitmap_t *renderer_symmenu_surface_for(renderer_t *r, symmenu_t *menu) {
@@ -117,4 +121,11 @@ void renderer_destroy(renderer_t *r) {
 		r->ops->destroy(r);
 	}
 	free(r);
+}
+
+int renderer_draw_cell_glyph(renderer_t *r, int x, int y,
+                             uint32_t cp, font_style_t style, rgb_t fg, rgb_t bg,
+                             int cell_w, int cell_h) {
+    if (!r || !r->ops->draw_glyph) return -1;
+    return r->ops->draw_glyph(r, x, y, cp, style, fg, bg, cell_w, cell_h);
 }

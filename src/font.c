@@ -1,6 +1,8 @@
 #include "font.h"
 
 #include <stdint.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +15,8 @@
 
 struct font {
 	FT_Face face;
+	FT_Face fallback[4];
+	int fallback_count;
 	int     pt_size;
 };
 
@@ -64,8 +68,86 @@ font_t *font_open(const char *path, int pt_size) {
 	return f;
 }
 
+/* Explicit opt-in: UI font discovery must still test each font's own cmap. */
+int font_add_fallback(font_t *f, const char *path) {
+    if (!f || !path || f->fallback_count >= 4) return -1;
+    FT_Face face = NULL;
+    if (FT_New_Face(g_library, path, 0, &face)) return -1;
+    if (FT_Set_Char_Size(face, 0, f->pt_size * 64, 0, 0)) {
+        FT_Done_Face(face); return -1;
+    }
+    f->fallback[f->fallback_count++] = face;
+    return 0;
+}
+
+static int find_cjk_font(const char *root, int depth, int *budget,
+                         char *out, size_t cap) {
+    if (depth < 0 || *budget <= 0) return 0;
+    DIR *d = opendir(root);
+    if (!d) return 0;
+    struct dirent *e;
+    int found = 0;
+    while (!found && *budget > 0 && (e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char path[1024];
+        int n = snprintf(path, sizeof(path), "%s/%s", root, e->d_name);
+        if (n < 0 || (size_t)n >= sizeof(path)) continue;
+        struct stat st;
+        if (stat(path, &st)) continue;
+        if (S_ISDIR(st.st_mode)) {
+            found = find_cjk_font(path, depth - 1, budget, out, cap);
+            continue;
+        }
+        const char *ext = strrchr(path, '.');
+        if (!ext || (strcmp(ext,".ttf") && strcmp(ext,".ttc") && strcmp(ext,".otf"))) continue;
+        --*budget;
+        FT_Face face = NULL;
+        if (FT_New_Face(g_library, path, 0, &face)) continue;
+        if (FT_Get_Char_Index(face, 0x4e2d) && FT_Get_Char_Index(face, 0x6587)) {
+            snprintf(out, cap, "%s", path); found = 1;
+        }
+        FT_Done_Face(face);
+    }
+    closedir(d);
+    return found;
+}
+
+int font_enable_system_fallback(font_t *f) {
+    static char path[1024];
+    static int searched;
+    if (!f) return -1;
+    if (!searched) {
+        /* Prefer the regular BB10 Simplified Chinese face over its bold peer. */
+        const char *preferred[] = {
+            "/usr/fonts/font_repository/monotype/MHeiS.GB18030_200910.ttf",
+            "/usr/fonts/font_repository/monotype/MHeiM.GB18030_200910.ttf",
+            NULL
+        };
+        for (int i = 0; preferred[i] && !path[0]; ++i) {
+            FT_Face face = NULL;
+            if (!FT_New_Face(g_library, preferred[i], 0, &face)) {
+                if (FT_Get_Char_Index(face, 0x4e2d) && FT_Get_Char_Index(face, 0x6587))
+                    snprintf(path, sizeof(path), "%s", preferred[i]);
+                FT_Done_Face(face);
+            }
+        }
+        int budget = 400;
+        if (!path[0]) find_cjk_font("/usr/fonts", 4, &budget, path, sizeof(path));
+        searched = 1;
+    }
+    return path[0] ? font_add_fallback(f, path) : -1;
+}
+
+static FT_Face glyph_face(font_t *f, uint32_t cp) {
+    if (FT_Get_Char_Index(f->face, cp)) return f->face;
+    for (int i = 0; i < f->fallback_count; ++i)
+        if (FT_Get_Char_Index(f->fallback[i], cp)) return f->fallback[i];
+    return f->face; /* Retain the primary font's missing-glyph indicator. */
+}
+
 void font_close(font_t *f) {
 	if (!f) return;
+	for (int i = 0; i < f->fallback_count; ++i) FT_Done_Face(f->fallback[i]);
 	if (f->face) FT_Done_Face(f->face);
 	free(f);
 }
@@ -85,10 +167,13 @@ int font_glyph_metrics(font_t *f, uint32_t codepoint,
                        int *miny, int *maxy,
                        int *advance) {
 	if (!f || !f->face) return -1;
-	FT_UInt gi = FT_Get_Char_Index(f->face, codepoint);
+	FT_Face face = glyph_face(f, codepoint);
+	FT_Set_Char_Size(face, 0, f->pt_size * 64, 0, 0);
+	FT_Set_Transform(face, NULL, NULL);
+	FT_UInt gi = FT_Get_Char_Index(face, codepoint);
 	if (gi == 0) return -1;
-	if (FT_Load_Glyph(f->face, gi, FT_LOAD_DEFAULT) != 0) return -1;
-	const FT_Glyph_Metrics *m = &f->face->glyph->metrics;
+	if (FT_Load_Glyph(face, gi, FT_LOAD_DEFAULT) != 0) return -1;
+	const FT_Glyph_Metrics *m = &face->glyph->metrics;
 	if (minx)    *minx    = (int)(m->horiBearingX >> 6);
 	if (maxx)    *maxx    = (int)((m->horiBearingX + m->width) >> 6);
 	if (maxy)    *maxy    = (int)(m->horiBearingY >> 6);
@@ -110,11 +195,12 @@ static void apply_italic_transform(font_style_t style, FT_Face face) {
 	}
 }
 
-bitmap_t *font_render_glyph_shaded(font_t *f, uint32_t codepoint,
+bitmap_t *font_render_glyph_cell(font_t *f, uint32_t codepoint,
                                    font_style_t style,
-                                   rgb_t fg, rgb_t bg) {
+                                   rgb_t fg, rgb_t bg, int cell_w, int cell_h) {
 	if (!f || !f->face) return NULL;
-	FT_Face face = f->face;
+	FT_Face face = glyph_face(f, codepoint);
+	FT_Set_Char_Size(face, 0, f->pt_size * 64, 0, 0);
 
 	apply_italic_transform(style, face);
 	if (FT_Load_Char(face, codepoint, FT_LOAD_DEFAULT) != 0) return NULL;
@@ -122,11 +208,28 @@ bitmap_t *font_render_glyph_shaded(font_t *f, uint32_t codepoint,
 	if (FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL) != 0) return NULL;
 
 	FT_GlyphSlot slot      = face->glyph;
-	int          ascender  = (int)(face->size->metrics.ascender >> 6);
-	int          line_skip = (int)(face->size->metrics.height >> 6);
+	int          ascender  = (int)(f->face->size->metrics.ascender >> 6);
+	int          line_skip = cell_h > 0 ? cell_h : font_line_skip(f);
 	int          advance   = (int)(slot->advance.x >> 6);
 	if (line_skip <= 0) line_skip = 1;
 	if (advance   <= 0) advance   = 1;
+    if (cell_w > 0) advance = cell_w;
+    /* A fallback face can have different metrics. Fit its ink inside the
+     * terminal cell, keeping the primary font's line pitch and ASCII grid. */
+    if (face != f->face && cell_w > 0) {
+        int w = (int)slot->bitmap.width, h = (int)slot->bitmap.rows;
+        if (w > advance || h > line_skip) {
+            FT_F26Dot6 size = f->pt_size * 64;
+            if (w > advance) size = size * advance / w;
+            if (h > line_skip && size > f->pt_size * 64 * line_skip / h)
+                size = f->pt_size * 64 * line_skip / h;
+            if (size < 64) size = 64;
+            if (FT_Set_Char_Size(face, 0, size, 0, 0) ||
+                FT_Load_Char(face, codepoint, FT_LOAD_DEFAULT)) return NULL;
+            if (style & FONT_STYLE_BOLD) FT_GlyphSlot_Embolden(face->glyph);
+            if (FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL)) return NULL;
+        }
+    }
 
 	bitmap_t *out = bitmap_alloc(advance, line_skip, BITMAP_FMT_RGBA8888);
 	if (!out) return NULL;
@@ -135,6 +238,17 @@ bitmap_t *font_render_glyph_shaded(font_t *f, uint32_t codepoint,
 	if (slot->bitmap.buffer && slot->bitmap.pixel_mode == FT_PIXEL_MODE_GRAY) {
 		int gx0 = slot->bitmap_left;
 		int gy0 = ascender - slot->bitmap_top;
+        if (face != f->face && cell_w > 0) {
+            /* Preserve the fallback's side bearings (notably fullwidth
+             * punctuation), centering its advance inside the grid span. */
+            gx0 = slot->bitmap_left + (advance - (int)(slot->advance.x >> 6)) / 2;
+            if (gx0 < 0) gx0 = 0;
+            if (gx0 + (int)slot->bitmap.width > advance)
+                gx0 = advance - (int)slot->bitmap.width;
+            if (gy0 < 0) gy0 = 0;
+            if (gy0 + (int)slot->bitmap.rows > line_skip)
+                gy0 = line_skip - (int)slot->bitmap.rows;
+        }
 		int gw  = (int)slot->bitmap.width;
 		int gh  = (int)slot->bitmap.rows;
 		int pitch = slot->bitmap.pitch;
@@ -172,4 +286,9 @@ bitmap_t *font_render_glyph_shaded(font_t *f, uint32_t codepoint,
 	}
 
 	return out;
+}
+
+bitmap_t *font_render_glyph_shaded(font_t *f, uint32_t codepoint,
+                                   font_style_t style, rgb_t fg, rgb_t bg) {
+    return font_render_glyph_cell(f, codepoint, style, fg, bg, 0, 0);
 }

@@ -224,6 +224,7 @@ static void dispatch(ctl_client_t *c, int argc, char **argv) {
 		          "  tabs stats          report stats for all tabs, one line each\n"
 		          "  clipboard read      print current clipboard text\n"
 		          "  action <name>       run an action (keybinding/builtin/lua:fn)\n"
+		          "                      mode_normal | mode_insert | mode_toggle (active tab)\n"
 		          "  notify [flags]      post/update a Hub notification; reuse is keyed\n"
 		          "                      on --id (same id updates in place). flags:\n"
 		          "                      [--id S] [--title T] [--body B] [--uri U]\n"

@@ -1,0 +1,21 @@
+# Cache a successful ownership audit for one day inside the private sandbox.
+# The original Zsh implementation remains available as term50_compinit_core.
+emulate -L zsh
+setopt extendedglob
+autoload -Uz term50_compinit_core
+local _term50_stamp="$ZSH_CACHE_DIR/compaudit-ok-$ZSH_VERSION"
+local -a _term50_recent=("$_term50_stamp"(Nmh-24))
+local -i _term50_rc
+if [[ $# == 3 && $1 == -i && $2 == -d && $3 == "$ZSH_COMPDUMP" &&
+      -n $_term50_recent && -s $ZSH_COMPDUMP && -O $ZSH_COMPDUMP &&
+      -O $_term50_stamp && "$(<"$_term50_stamp")" == "$fpath" ]]; then
+  term50_compinit_core -C "$@"
+  return $?
+fi
+term50_compinit_core "$@"
+_term50_rc=$?
+if (( _term50_rc == 0 )) && [[ $# == 3 && $1 == -i && $2 == -d &&
+    $3 == "$ZSH_COMPDUMP" && ${_comp_secure:-} != yes && -s $ZSH_COMPDUMP ]]; then
+  (umask 077; print -r -- "$fpath" >| "$_term50_stamp")
+fi
+return $_term50_rc

@@ -32,6 +32,7 @@ typedef struct ghostty_bridge_cell {
   int inverse;
   int invisible;
   int wide_tail;
+  int columns; /* 0 continuation, 1 narrow/wrap spacer, 2 wide lead */
 } ghostty_bridge_cell_t;
 
 typedef struct ghostty_bridge_frame {
@@ -92,5 +93,6 @@ int ghostty_bridge_alt_scroll_ready(ghostty_bridge_t *b);
  * cursor keys should be encoded as SS3 (ESC O x) rather than CSI (ESC [ x).
  * Returns 0 if b is NULL. */
 int ghostty_bridge_app_cursor_keys(ghostty_bridge_t *b);
+int ghostty_bridge_bracketed_paste(ghostty_bridge_t *b);
 
 #endif /* GHOSTTY_BRIDGE_H_ */

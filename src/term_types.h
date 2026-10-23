@@ -8,6 +8,17 @@
 #ifndef TERM_TYPES_H_
 #define TERM_TYPES_H_
 
+typedef enum {
+	TERM_INPUT_INSERT = 0,
+	TERM_INPUT_NORMAL = 1,
+} term_input_mode_t;
+
+typedef enum {
+	TERM_PROFILE_TERMINAL = 0,
+	TERM_PROFILE_CLAUDE = 1, /* user-defined normal_keys; no product commands in C */
+	TERM_PROFILE_TTY = 2,
+} term_profile_t;
+
 typedef struct rgb {
 	unsigned char r;
 	unsigned char g;

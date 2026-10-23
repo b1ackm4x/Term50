@@ -21,10 +21,14 @@
     <asset path="share/bbnix">bbnix</asset>
     <asset path="share/fonts">fonts</asset>
     <asset path="share/NOTICE">NOTICE</asset>
+    <asset path="vendor/voice-openssl/lib/libssl.so.3">lib/libssl.so.3</asset>
+    <asset path="vendor/voice-openssl/lib/libcrypto.so.3">lib/libcrypto.so.3</asset>
+    <asset path="vendor/voice-openssl/LICENSE.txt">voice-openssl-LICENSE.txt</asset>
     <asset path="share/LICENSE">LICENSE</asset>
     <asset path="share/README">README</asset>
     <asset path="share/README45">README45</asset>
     <asset path="share/term.lua.reference">term.lua.reference</asset>
+    <asset path="share/term.lua.modal-example">term.lua.modal-example</asset>
     <asset path="share/AGENTS.md">AGENTS.md</asset>
     <asset path="share/icons/icon-86x86.png">icon-86x86.png</asset>
     <asset path="share/icons/icon-90x90.png">icon-90x90.png</asset>

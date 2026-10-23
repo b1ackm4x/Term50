@@ -11,6 +11,8 @@ typedef struct keymap {
 	char from;
 	char *to;
 	action_t action;
+	int next_mode;       /* 0: keep, 1: INSERT, 2: NORMAL (mode + 1) */
+	char *label;         /* owned optional help label */
 	int sticky;          /* metamode: keep metamode armed after firing (else exit) */
 } keymap_t;
 
@@ -44,6 +46,11 @@ typedef struct pref {
 	 * a hit keeps metamode armed (former metamode_sticky_keys) or exits it
 	 * (former metamode_keys / metamode_func_keys). */
 	keymap_t *metamode_keys;
+	keymap_t *normal_keys;
+	keymap_t *terminal_keys;
+	term_input_mode_t default_input_mode;
+	int normal_insert_hold_enabled;
+	int normal_insert_hold_key;
 	
 	symmenu_t *main_symmenu;
 	symmenu_t *accent_menus[26][2];

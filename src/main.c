@@ -44,6 +44,7 @@
 #include "terminal.h"
 #include "action.h"
 #include "app.h"
+#include "modal_input.h"
 #include "prefs.h"
 #include "symmenu.h"
 #include "renderer.h"
@@ -55,6 +56,12 @@
 #include "control.h"
 #include "url_pick.h"
 #include "bbnix_env.h"
+#include "quick_ui.h"
+#include "ui_painter.h"
+#include "voice_client.h"
+#include "voice_commit.h"
+#include "voice_shortcut.h"
+#include <clipboard/clipboard.h>
 
 static int exit_application = 0;
 
@@ -129,6 +136,24 @@ static pref_t *prefs = NULL;
 static renderer_t *renderer = NULL;
 static app_t *g_app = NULL;
 static platform_t *g_platform = NULL;
+static quick_ui_t g_ui;
+static ui_painter_t g_ui_painter;
+static char g_ui_settings_dir[1200];
+static int g_ui_initialized;
+static voice_shortcut_t g_voice_shortcut;
+static voice_client_t *g_voice;
+static session_id_t g_voice_target;
+static session_id_t g_voice_probe_target;
+static session_id_t g_voice_commit_target;
+static unsigned g_voice_change;
+static int g_voice_probe, g_voice_committing;
+static int g_reply_waiting;
+static uint64_t g_voice_original_out;
+static voice_commit_t g_voice_commit;
+static char g_voice_commit_text[VOICE_TEXT_MAX+1];
+static struct timespec g_voice_commit_started;
+static void ui_sync(void);
+static void ui_reset_transients(void);
 /* Set by the reload_config builtin; consumed at a safe point in the main
  * loop (never inside action dispatch / a lua_pcall). Same input thread,
  * same lock as event handling, so a plain int is sufficient. */
@@ -151,6 +176,8 @@ typedef struct input_state {
 	char key_repeat_done;
 } input_state_t;
 static input_state_t kbd;
+static modal_input_t modal_kbd;
+static modal_view_t modal_view;
 
 /* On-screen keybinding cheat sheet: a pre-composed panel of the
  * chord_bindings labels, blitted in render_ghostty when current_help_overlay
@@ -159,6 +186,9 @@ static input_state_t kbd;
 static int current_help_overlay = 0;
 static bitmap_t *help_overlay_surface = NULL;
 static int help_startup_shown = 0;
+static session_id_t help_session;
+static term_input_mode_t help_mode;
+static term_profile_t help_profile;
 
 static rgb_t metamode_cursor_fg = TERM_COLOR_BLACK;
 static rgb_t metamode_cursor_bg = TERM_COLOR_GREEN;
@@ -187,12 +217,20 @@ static int grid_top_pad = 0;
  * Start dirty for the first frame. */
 static int screen_dirty = 1;
 static int screen_full_dirty = 1;
+static int screen_base_dirty = 1;
+static uint64_t g_voice_cached_frames, g_voice_base_frames;
 
 static void mark_screen_dirty(int full_repaint) {
 	screen_dirty = 1;
+	screen_base_dirty = 1;
 	if (full_repaint) {
 		screen_full_dirty = 1;
 	}
+}
+
+static void mark_screen_overlay_dirty(void) {
+	screen_dirty = 1;
+	screen_full_dirty = 1;
 }
 
 /* Tab overlay: one-row strip drawn over row 0. Always visible while
@@ -464,14 +502,13 @@ static int terminal_key_sequence(int sym, int mod, UChar *tbuf) {
 }
 
 
-int send_metamode_keystrokes(const char* keystrokes){
+int send_session_keystrokes(session_t *s, const char* keystrokes){
 
 	UChar* ukeystrokes;
 	size_t ukeystrokes_len;
 	size_t keystrokes_len;
 	int terminfo_key = 0;
 	UChar terminfo_keystrokes[CHARACTER_BUFFER];
-	session_t *s = app_active_session(g_app);
 
 	if(keystrokes){
 		terminfo_key = is_terminfo_keystrokes(keystrokes);
@@ -480,21 +517,25 @@ int send_metamode_keystrokes(const char* keystrokes){
 		if(terminfo_key){
 			ukeystrokes_len = terminal_key_sequence(terminfo_key, 0, terminfo_keystrokes);
 			/* and write out to the tty whatever the keys were */
-			session_write_text(s, terminfo_keystrokes, ukeystrokes_len);
-			return 1;
+			return session_write_text(s, terminfo_keystrokes, ukeystrokes_len) == (ssize_t)ukeystrokes_len;
 		}
 		// else
 		keystrokes_len = strlen(keystrokes);
 		/* config strings are ascii, but we can put utf8 in there too */
-		ukeystrokes = (UChar*)calloc(keystrokes_len, sizeof(UChar));
+		ukeystrokes = (UChar*)calloc(keystrokes_len + 1, sizeof(UChar));
+		if (!ukeystrokes) return 0;
 		ukeystrokes_len = io_read_utf8_string(keystrokes, keystrokes_len, ukeystrokes);
 		/* and write out to the tty whatever the keys were */
-		session_write_text(s, ukeystrokes, ukeystrokes_len);
+		ssize_t written = session_write_text(s, ukeystrokes, ukeystrokes_len);
 		free(ukeystrokes);
-		return 1;
+		return written > 0 || (written == 0 && keystrokes_len == 0);
 	}
 	/* no keystrokes saved for this key */
 	return 0;
+}
+
+int send_metamode_keystrokes(const char *keys) {
+	return send_session_keystrokes(app_active_session(g_app), keys);
 }
 
 /* These local-UI mutators are the funnel for keyboard/touch-driven
@@ -641,19 +682,45 @@ static void help_overlay_build(void){
 			snprintf(lines[n], HELP_LINE_MAX, __VA_ARGS__); ++n; } \
 	} while (0)
 
+	help_session = session_id(app_active_session(g_app));
+	help_mode = session_input_mode(app_active_session(g_app));
+	help_profile = session_profile(app_active_session(g_app));
 	HELP_PUSH("%s", APP_DISPLAY_NAME " keybindings  (any key closes)");
+	HELP_PUSH("Mode: %s", help_mode == TERM_INPUT_NORMAL ? "NORMAL" : "INSERT");
+	HELP_PUSH("Profile: %s",help_profile==TERM_PROFILE_TERMINAL?"Terminal":help_profile==TERM_PROFILE_CLAUDE?"Claude":"tty");
+	HELP_PUSH("NORMAL shortcuts (unbound text is ignored):");
+	HELP_PUSH("Enter / Esc / Ctrl / navigation stay active.");
+	int normal_lines = 0;
+	for (const keymap_t *km = help_profile==TERM_PROFILE_TERMINAL?prefs->terminal_keys:prefs->normal_keys; km && km->to; ++km) {
+		if (normal_lines++ == 16) { HELP_PUSH("  More NORMAL keys: ~/.term.lua"); break; }
+		char td[32];
+		keymap_to_display(km->label ? km->label : km->to, td, sizeof(td));
+		HELP_PUSH("  %c  %s%s", km->from, td, km->next_mode == 1 ? " -> INSERT" : km->next_mode == 2 ? " -> NORMAL" : "");
+	}
+	if (prefs->normal_insert_hold_enabled)
+		HELP_PUSH("  hold %s = INSERT", help_keyname(prefs->normal_insert_hold_key));
+	HELP_PUSH("INSERT: Esc goes to terminal; mode chords below.");
 
 	if (prefs->chord_bindings && prefs->chord_bindings->keycode != 0) {
 		HELP_PUSH("%s", "");
 		HELP_PUSH("%s", "Chords:");
 		for (chord_t *c = prefs->chord_bindings; c->keycode != 0; ++c) {
-			HELP_PUSH("  %s", c->label ? c->label
-			                           : (c->spec ? c->spec : ""));
+			if (c->label) { HELP_PUSH("  %s", c->label); }
+			else {
+				char key[2] = {(char)c->keycode, 0};
+				HELP_PUSH("  %s%s%s%s%s = %s",
+				          c->mods & KEYMOD_SHIFT ? "Shift+" : "",
+				          c->mods & KEYMOD_CTRL ? "Ctrl+" : "",
+				          c->mods & KEYMOD_ALT ? "Alt+" : "",
+				          c->mods & CHORD_MOD_SYM ? "Sym+" : "",
+				          c->keycode > 32 && c->keycode < 127 ? key : help_keyname(c->keycode),
+				          c->spec ? c->spec : "");
+			}
 		}
 	}
 
 	HELP_PUSH("%s", "");
-	HELP_PUSH("%s", "Gestures:");
+	HELP_PUSH("%s", "INSERT gestures:");
 	HELP_PUSH("  double-tap %s = Meta",
 	          help_keyname(prefs->metamode_doubletap_key));
 	if (prefs->keyhold_actions) {
@@ -692,6 +759,11 @@ static void help_overlay_build(void){
 		return;
 	}
 	int line_h = font_line_skip(of);
+	int visible_lines = line_h > 0 ? (fb_h - 2 * oadv) / line_h : n;
+	if (visible_lines > 0 && n > visible_lines) {
+		n = visible_lines;
+		snprintf(lines[n - 1], HELP_LINE_MAX, "More bindings: ~/.term.lua");
+	}
 
 	size_t maxlen = 0;
 	for (int i = 0; i < n; ++i) {
@@ -736,6 +808,8 @@ int font_init(int font_size){
 			return TERM_FAILURE;
 		}
 	}
+	if (font_enable_system_fallback(font) != 0)
+		fprintf(stderr, "No system CJK fallback font available\n");
 	PRINT(stderr, "Font is Fixed Width: %d\n", font_is_fixed_width(font));
 
 	/* initialize modifier indicator glyphs */
@@ -803,6 +877,10 @@ int font_init(int font_size){
 
 void font_uninit(){
 	bitmap_free(help_overlay_surface); help_overlay_surface = NULL;
+	/* The allocator can reuse the old font address. Invalidate the borrowed
+	 * UI identity explicitly before the next font/anchor is assigned. */
+	g_ui_painter.terminal_font = g_ui_painter.cached_terminal_font = NULL;
+	g_ui_painter.anchor_valid = 0;
 
 	if (renderer != NULL) {
 		renderer_set_font(renderer, NULL);
@@ -1308,11 +1386,15 @@ static void app_reload_config(void){
 	kbd.metamode = 0;
 	kbd.altsym_lock = 0;
 	kbd.symmenu_lock = 0;
+	modal_kbd.prefix = 0;
+	modal_kbd.hold_key = 0;
+	/* Keep blocked physical keys across reload until release. */
 	current_help_overlay = 0;            /* surface is rebuilt by rescreen below */
 
 	destroy_preferences_members(prefs);  /* free old arrays, keep struct */
 	*prefs = *fresh;                     /* move new data into stable struct */
 	free(fresh);                         /* free only the empty container */
+	if(g_ui_initialized){g_ui.dirty=1;ui_sync();}
 
 	/* Decode the new symmenu labels before any code touches sk->uc. */
 	preferences_decode_symmenu_labels(prefs);
@@ -1426,6 +1508,15 @@ int app_dispatch_action(app_t *app, const action_t *action) {
 	case TERM_ACTION_SEND_TERMINFO:
 		return session_dispatch_action(session, action);
 	case TERM_ACTION_BUILTIN:
+		if (modal_is_mode_action(action)) {
+			if (!modal_apply_action(app, action)) return 0;
+			if (kbd.current_symmenu) symmenu_toggle(NULL);
+			kbd.metamode = kbd.altsym_lock = kbd.symmenu_lock = 0;
+			kbd.vmodifiers = kbd.key_repeat_done = 0;
+			modal_kbd.prefix = 0;
+			mark_screen_dirty(1);
+			return 1;
+		}
 		switch (action->as.builtin.id) {
 		case TERM_BUILTIN_ALT_DOWN:
 			toggle_vkeymod(KEYMOD_ALT);
@@ -1433,6 +1524,11 @@ int app_dispatch_action(app_t *app, const action_t *action) {
 		case TERM_BUILTIN_CTRL_DOWN:
 			toggle_vkeymod(KEYMOD_CTRL);
 			return 1;
+		case TERM_BUILTIN_QUICK_ACTIONS:
+		case TERM_BUILTIN_SETTINGS_OPEN:
+			ui_sync();ui_reset_transients();
+			quick_ui_open(&g_ui,action->as.builtin.id==TERM_BUILTIN_SETTINGS_OPEN?UI_SETTINGS:UI_QUICK);
+			mark_screen_dirty(1);return 1;
 		case TERM_BUILTIN_RESCREEN:
 			rescreen(-1, -1);
 			return 1;
@@ -1494,6 +1590,8 @@ int app_dispatch_action(app_t *app, const action_t *action) {
 				platform_toast(g_platform, msg);
 				return 0;
 			}
+			if(g_ui_initialized&&g_ui.saved.default_profile>=0)
+				session_set_profile(new_s,(term_profile_t)g_ui.saved.default_profile);
 			if (app_session_count(app) == 2) {
 				/* 1->2 transition: apply_tab_strip_layout reflows every
 				 * session (including the new one) through setup_screen_size. */
@@ -1936,6 +2034,9 @@ static void vmodifier_merge_and_clear(int *modifiers){
 static void terminal_fallback(session_t *session, const key_event_t *k, int modifiers){
 	UChar c[CHARACTER_BUFFER];
 	int num_chars, nc;
+
+	/* Defense in depth: NORMAL can never emit through terminal fallback. */
+	if (session_input_mode(session) == TERM_INPUT_NORMAL) return;
 	switch (k->sym) {
 	case KEYCODE_PAUSE      :
 	case KEYCODE_SCROLL_LOCK:
@@ -2006,7 +2107,15 @@ static void app_handle_key(app_t *app, const key_event_t *k)
 	int modifiers = k->modifiers;
 	int just_set;
 
-	if (!k->pressed) {
+	/* Dismissal itself owns this press through release, avoiding a held
+	 * dismiss key entering the old INSERT keyhold/backspace path. */
+	if (k->pressed && help_dismiss_step(k)) {
+		modal_input_block(&modal_kbd, k->sym);
+		return;
+	}
+	if (modal_input_handle(&modal_kbd, app, prefs, k, current_modmask(), app_dispatch_action)) {
+		if (modal_kbd.consumed_mods) chord_clear_prefix(modal_kbd.consumed_mods);
+		if (k->pressed) mark_screen_dirty(1);
 		return;
 	}
 
@@ -2014,9 +2123,6 @@ static void app_handle_key(app_t *app, const key_event_t *k)
 	      (int)k->sym, modifiers, (char)k->sym, (int)k->alternate_sym);
 	fflush(stdout);
 
-	if (help_dismiss_step(k)) {                  /* help overlay modal */
-		return;
-	}
 	just_set = doubletap_step(k);                /* metamode doubletap (no return) */
 
 	if (run_layers(kbd_layers_pre,
@@ -2260,6 +2366,7 @@ static int startup_init() {
 }
 
 void app_shutdown(void){
+    voice_client_destroy(g_voice);g_voice=NULL;
 
 	/* Every cleanup below is gated on the matching init flag so the
 	 * early-exit paths in main() (io_init / pty_init / sigaction / startup_init
@@ -2289,6 +2396,7 @@ void app_shutdown(void){
 	/* Drop the URL picker's transient state (notably the QR bitmap) before
 	 * the renderer goes away. Idempotent and safe when inactive. */
 	url_pick_exit();
+	ui_painter_destroy(&g_ui_painter);
 
 	/* Order matters: free the renderer first so its glyph cache (which
 	 * borrows the font) drops before font_uninit closes the font. Then
@@ -2352,6 +2460,9 @@ static void render_ghostty_cell(uint16_t x, uint16_t y,
 	struct ghostty_render_context *ctx = (struct ghostty_render_context *)userdata;
 
 	if (ctx == NULL || cell == NULL || x >= cols || y >= rows) { return; }
+    /* The leading wide cell paints both columns. Painting the continuation
+     * again would erase the right half of every CJK glyph. */
+    if (cell->columns == 0) return;
 
 	rgb_t fg = to_rgb(cell->has_fg ? cell->fg : ctx->frame.default_fg);
 	rgb_t bg = to_rgb(cell->has_bg ? cell->bg : ctx->frame.default_bg);
@@ -2367,7 +2478,7 @@ static void render_ghostty_cell(uint16_t x, uint16_t y,
 	rect_t destrect;
 	destrect.x = x * advance;
 	destrect.y = grid_top_pad + y * text_height;
-	destrect.w = advance;
+	destrect.w = advance * cell->columns;
 	destrect.h = text_height;
 	renderer_fill_rect(renderer, &destrect, bg);
 
@@ -2380,8 +2491,8 @@ static void render_ghostty_cell(uint16_t x, uint16_t y,
 	if (cell->italic)    { style |= FONT_STYLE_ITALIC; }
 	if (cell->underline) { style |= FONT_STYLE_UNDERLINE; }
 
-	if (renderer_draw_glyph(renderer, destrect.x, destrect.y,
-	                        cell->codepoint, style, fg, bg) != 0) {
+	if (renderer_draw_cell_glyph(renderer, destrect.x, destrect.y,
+	                        cell->codepoint, style, fg, bg, destrect.w, destrect.h) != 0) {
 		PRINT(stderr, "Ghostty glyph render failed for U+%04x\n",
 		      (unsigned)cell->codepoint);
 		ctx->failed = 1;
@@ -2397,6 +2508,9 @@ static int render_ghostty(int force_full_repaint) {
 	ghostty_bridge_t *bridge;
 	int cursor_visible;
 	int cursor_changed;
+	/* Recompose the underlying cells before alpha UI; otherwise repeated
+	 * blends would accumulate opacity or leave the old drag location. */
+	if(g_ui_initialized)force_full_repaint=1;
 
 	bridge = session_bridge(app_active_session(g_app));
 	if (bridge == NULL) {
@@ -2431,6 +2545,18 @@ static int render_ghostty(int force_full_repaint) {
 	}
 
 	rgb_t bg = to_rgb(ctx.frame.default_bg);
+	/* The terminal does not change on waveform/caret ticks. Restore its
+	 * saved underlay into the newly latched buffer before drawing fresh UI.
+	 * Real PTY output, cursor movement, configuration and other overlays
+	 * invalidate the cache through mark_screen_dirty. */
+	int inline_animation = g_ui_initialized &&
+	    (quick_ui_voice_inline(&g_ui) || g_ui_painter.complete_ms);
+	if (inline_animation && !screen_base_dirty && !ctx.frame.dirty && !cursor_changed &&
+	    renderer_screen_restore_base(renderer)) {
+		g_voice_cached_frames++;
+		force_full_repaint = 0;
+		goto compose_ui;
+	}
 	if (force_full_repaint) {
 		renderer_clear(renderer, bg);
 	}
@@ -2468,8 +2594,12 @@ static int render_ghostty(int force_full_repaint) {
 		draw_tab_overlay();
 	}
 
+	/* Persistent N/I badge uses the existing right-edge indicator area;
+	 * no extra terminal row/column or PTY resize is introduced. */
+	/* The floating entry now carries the current profile icon. */
+
 	if (kbd.metamode && metamode_cursor != NULL) {
-		renderer_draw_bitmap(renderer, (cols - 1) * advance, grid_top_pad + 0, metamode_cursor);
+		renderer_draw_bitmap(renderer, (cols - 2) * advance, grid_top_pad + 0, metamode_cursor);
 	}
 	if (kbd.vmodifiers & KEYMOD_CTRL) {
 		renderer_draw_bitmap(renderer, (cols - 1) * advance, grid_top_pad + 1 * text_height, ctrl_key_indicator);
@@ -2506,6 +2636,9 @@ static int render_ghostty(int force_full_repaint) {
 		renderer_draw_bitmap(renderer, 0, fb_h - symmenu_surface->h, symmenu_surface);
 	}
 
+	if (current_help_overlay && (help_session != session_id(app_active_session(g_app)) ||
+	    help_mode != session_input_mode(app_active_session(g_app)) ||
+	    help_profile != session_profile(app_active_session(g_app)))) help_overlay_build();
 	if (current_help_overlay && help_overlay_surface != NULL) {
 		int hx = (fb_w - help_overlay_surface->w) / 2;
 		int hy = (fb_h - help_overlay_surface->h) / 2;
@@ -2519,6 +2652,18 @@ static int render_ghostty(int force_full_repaint) {
 		url_pick_render(renderer, &layout);
 	}
 
+	if (inline_animation) {
+		g_voice_base_frames++;
+		screen_base_dirty = !renderer_screen_capture_base(renderer);
+	}
+compose_ui:
+	if(g_ui_initialized){
+		ui_sync();
+		if(quick_ui_voice_inline(&g_ui))ui_painter_voice_anchor(&g_ui_painter,&g_ui,font,
+		    ctx.frame.cursor_x*advance,grid_top_pad+ctx.frame.cursor_y*text_height,
+		    advance,text_height,grid_top_pad,bg);
+		ui_painter_render(&g_ui_painter,&g_ui,renderer,prefs->font_path);
+	}
 	ghostty_bridge_finish_frame(bridge);
 	renderer_end_frame(renderer, force_full_repaint);
 
@@ -2561,7 +2706,7 @@ static int tab_overlay_layout(int pen_x_out[APP_MAX_SESSIONS]) {
 	}
 	unsigned count = app_session_count(g_app);
 	int x = 0;
-	int strip_w = fb_w;
+	int strip_w = (cols - 1) * advance; /* reserve existing strip space for N/I */
 	int overflowed = 0;
 	for (unsigned i = 0; i < count; ++i) {
 		int pill_w = tab_overlay_pill_width_cells(i) * advance;
@@ -3081,9 +3226,282 @@ static void handle_invoke_open(app_t *app, const char *uri) {
 	}
 }
 
+static void ui_sync(void) {
+	if(!g_ui_initialized||!g_app)return;
+	ui_tab_t tabs[APP_MAX_SESSIONS];unsigned n=app_session_count(g_app);
+	for(unsigned i=0;i<n;i++){
+		session_t *s=app_session_at(g_app,i);
+		tabs[i]=(ui_tab_t){session_id(s),session_input_mode(s),session_profile(s)};
+	}
+	quick_ui_sync(&g_ui,tabs,n,session_id(app_active_session(g_app)));
+	quick_ui_geometry(&g_ui,fb_w,fb_h,kbd.virtualkeyboard_visible?platform_vkb_height(g_platform):0);
+}
+
+static void ui_reset_transients(void) {
+	kbd.current_symmenu=NULL;kbd.metamode=kbd.altsym_lock=kbd.symmenu_lock=0;
+	kbd.vmodifiers=kbd.key_repeat_done=0;modal_kbd.prefix=0;modal_kbd.hold_key=0;
+	drag_reset();platform_set_idle_timeout(g_platform,PLATFORM_IDLE_TIMEOUT_MS_DEFAULT);
+	current_help_overlay=0;url_pick_exit();
+}
+
+static const char *voice_status(int state) {
+	switch(state){
+	case VOICE_CONNECTING:return "正在连接 Mac，请稍候";
+	case VOICE_RECORDING:return "正在录音；按回车结束";
+	case VOICE_FINALIZING:return "豆包正在整理文字";
+	case VOICE_READY:return "可用键盘修改；回车只插入，不执行";
+	case VOICE_ERROR:return "本次未完成；检查 Mac 接收窗口与连接后重试";
+	default:return "准备就绪";
+	}
+}
+static const char *voice_error_status(const char *error) {
+	if(!strcmp(error,"BUSY"))return "Mac 正在处理另一场语音，请稍后重试";
+	if(strstr(error,"FOCUS"))return "Mac 接收窗口失去焦点，本次已停止";
+	if(!strcmp(error,"FOREGROUND_RESTORE_FAILED"))
+		return "Mac 未能切回原窗口，请手动检查当前窗口";
+	if(strstr(error,"RESTORE")||strstr(error,"CLEANUP"))return "Mac 恢复失败，请检查麦克风与输入法";
+	if(!strcmp(error,"EVENT_PERMISSION"))return "请在 Mac 授权接收程序的键盘控制权限";
+	if(!strcmp(error,"MICROPHONE_ROUTE_PAGE_TIMEOUT")||!strcmp(error,"MICROPHONE_ROUTE_SETTINGS_TIMEOUT"))
+		return "请解锁 Mac，并打开豆包设置的语音输入页后重试";
+	if(!strcmp(error,"microphone_overrun"))return "手机录音缓冲区已满，本次已停止，请重试";
+	if(strstr(error,"microphone"))return "手机录音不可用，请检查麦克风权限或占用";
+	if(strstr(error,"MICROPHONE_ROUTE")&&strstr(error,"TIMEOUT"))
+		return "Mac 虚拟麦克风配置超时，请检查桥接设置";
+	if(strstr(error,"MICROPHONE"))return "Mac 虚拟麦克风未就绪，请检查桥接设置";
+	if(strstr(error,"authentication"))return "配对失败，请核对 Mac 与手机的密钥";
+	if(!strcmp(error,"NO_SPEECH"))return "没有收到识别文字，请重试";
+	if(strstr(error,"TEXT")||!strcmp(error,"invalid_transcript"))return "识别文本无效或过长，本次已停止";
+	if(strstr(error,"TIMEOUT")||strstr(error,"timeout")||!strcmp(error,"NO_STABLE_TEXT"))
+		return "等待超时；可复制已收到的草稿";
+	return "本次未完成；可复制草稿，检查连接后重试";
+}
+static int g_voice_screen_awake;
+static void voice_screen_awake_sync(void) {
+	int busy = g_voice_target && g_ui.voice_state >= UI_VOICE_CONNECTING &&
+	    g_ui.voice_state <= UI_VOICE_FINALIZING;
+	if (busy == g_voice_screen_awake) return;
+	/* Long dictation must survive the ordinary display timeout. This is a
+	 * window-scoped temporary policy; user locking/backgrounding still
+	 * cancels capture, and completed/canceled sessions restore preferences. */
+	if (platform_set_screen_awake(g_platform, busy || prefs->screen_idle_awake))
+		fprintf(stderr, "voice: could not update temporary screen idle policy\n");
+	g_voice_screen_awake = busy;
+}
+static ssize_t voice_write(void *ctx,const char *p,size_t n){return session_write_exclusive(ctx,p,n);}
+static uint64_t voice_shortcut_now(void);
+static void voice_tick(void) {
+	if(!g_voice)return;
+	if(g_voice_committing){
+		session_t *s=app_session_by_id(g_app,g_voice_commit_target);
+		struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);
+		int rc=s&&!session_is_exited(s)?voice_commit_drain(&g_voice_commit,voice_write,s):-1;
+		if(!rc && t.tv_sec-g_voice_commit_started.tv_sec>10)rc=-1;
+		if(rc){
+			if(s){
+				char tail[16];size_t n=rc<0?voice_commit_abort_tail(&g_voice_commit,tail):0;
+				/* Queue before releasing ownership; following input cannot overtake
+				 * the rest of a split character or bracketed-paste terminator. */
+				session_finish_write_exclusive(s,tail,n);
+			}
+			g_voice_committing=0;
+			if(rc>0){if(g_ui.page==UI_VOICE)quick_ui_close(&g_ui);ui_painter_voice_complete(&g_ui_painter,voice_shortcut_now());}
+			else{
+				/* Never replay the whole draft after a partial write. */
+				int copied=io_copy_to_clipboard(g_voice_commit_text,strlen(g_voice_commit_text))==0;
+				quick_ui_voice_update(&g_ui,VOICE_ERROR,NULL,g_ui.voice_revision,copied?
+				    "插入中断，草稿已复制；请先检查终端输入":"插入中断，复制失败；请保留草稿并检查终端输入");
+				platform_toast(g_platform,copied?"插入未完成；草稿已复制，请检查输入行":"插入未完成；草稿复制失败，请保留当前草稿");
+			}
+			g_voice_target=g_voice_commit_target=0;memset(&g_voice_commit,0,sizeof(g_voice_commit));memset(g_voice_commit_text,0,sizeof(g_voice_commit_text));
+		}
+		platform_set_idle_timeout(g_platform,g_voice_committing?50:PLATFORM_IDLE_TIMEOUT_MS_DEFAULT);
+		return;
+	}
+	/* A connection test may run while a completed draft is being reviewed.
+	 * Its target/lifetime must not replace the draft's original input guard. */
+	if(g_voice_target){
+		session_t *s=app_session_by_id(g_app,g_voice_target);
+		if(!s||session_is_exited(s)||!quick_ui_voice_context(&g_ui)||
+		   session_id(app_active_session(g_app))!=g_voice_target){
+			voice_client_cancel(g_voice);g_voice_target=g_voice_probe_target=0;g_voice_probe=0;
+			if(!s||session_is_exited(s))quick_ui_voice_target_lost(&g_ui);
+			else quick_ui_voice_update(&g_ui,VOICE_ERROR,NULL,g_ui.voice_revision,"标签页已切换，本次语音已停止");
+			platform_set_idle_timeout(g_platform,PLATFORM_IDLE_TIMEOUT_MS_DEFAULT);return;
+		}
+	}
+	if(g_voice_probe){
+		session_t *s=app_session_by_id(g_app,g_voice_probe_target);
+		int connection=g_ui.page==UI_CONNECTION||
+		    (g_ui.page==UI_EDITOR&&g_ui.editor_parent==UI_CONNECTION);
+		if(!s||session_is_exited(s)||!connection||session_id(app_active_session(g_app))!=g_voice_probe_target){
+			voice_client_cancel(g_voice);g_voice_probe=0;g_voice_probe_target=0;
+			platform_set_idle_timeout(g_platform,PLATFORM_IDLE_TIMEOUT_MS_DEFAULT);return;
+		}
+	}
+	if(!g_voice_target&&!g_voice_probe)return;
+	voice_snapshot_t snap;voice_client_snapshot(g_voice,&snap);
+	if(snap.change!=g_voice_change){
+		g_voice_change=snap.change;
+		if(g_voice_probe){
+			if(snap.state==VOICE_READY||snap.state==VOICE_ERROR){
+				quick_ui_message(&g_ui,snap.state==VOICE_READY?"Mac 加密连接正常":"连接失败，请检查地址、配对密钥及 Mac 服务");g_voice_probe=0;g_voice_probe_target=0;
+			}
+		}else quick_ui_voice_update(&g_ui,snap.state,snap.text,snap.revision,snap.state==VOICE_ERROR?voice_error_status(snap.error):voice_status(snap.state));
+	}
+	platform_set_idle_timeout(g_platform,(snap.state>=VOICE_CONNECTING&&snap.state<=VOICE_FINALIZING)?50:PLATFORM_IDLE_TIMEOUT_MS_DEFAULT);
+}
+
+static void ui_apply_effect(void) {
+	ui_effect_t e;if(!quick_ui_take_effect(&g_ui,&e))return;
+	if(e.kind==UI_EFFECT_VOICE_CANCEL){
+		voice_client_cancel(g_voice);
+		g_voice_probe=0;g_voice_probe_target=0;
+		if(!g_voice_committing)g_voice_target=0;
+		return;
+	}
+	/* Rescuing a draft does not depend on the original PTY still existing. */
+	if(e.kind==UI_EFFECT_VOICE_COPY){
+		quick_ui_message(&g_ui,io_copy_to_clipboard(g_ui.voice_text,strlen(g_ui.voice_text))==0?"草稿已复制":"复制失败，请重试");return;
+	}
+	if(e.kind==UI_EFFECT_SAVE){
+		quick_ui_save_result(&g_ui,ui_settings_save(g_ui_settings_dir,&g_ui.draft)==0);
+		if(g_ui.page==UI_CLOSED&&g_ui.status[0])platform_toast(g_platform,g_ui.status);
+		return;
+	}
+	/* Never let id=0 select whatever happens to be active. */
+	session_t *s=e.target?app_session_by_id(g_app,e.target):NULL;
+	if(!s||session_is_exited(s)||session_master_fd(s)<0){
+		if(e.kind==UI_EFFECT_VOICE_START||e.kind==UI_EFFECT_VOICE_INSERT){
+			quick_ui_voice_target_lost(&g_ui);
+			voice_client_cancel(g_voice);g_voice_target=g_voice_probe_target=0;g_voice_probe=0;
+		}
+		platform_toast(g_platform,"原标签页已关闭");return;
+	}
+	switch(e.kind){
+	case UI_EFFECT_VOICE_START:
+	case UI_EFFECT_VOICE_TEST:{
+		if(g_voice_committing){quick_ui_message(&g_ui,"正在完成上次插入，请稍候");break;}
+		const ui_settings_t *cfg=e.kind==UI_EFFECT_VOICE_TEST?&g_ui.draft:&g_ui.saved;
+		/* Resolve/open the Chinese UI font before QSA begins capture. The
+		 * first lookup can be slow on device and must not starve its ring. */
+		if(e.kind==UI_EFFECT_VOICE_START)ui_painter_voice_prepare(&g_ui_painter,&g_ui,prefs->font_path);
+		if(!g_voice)g_voice=voice_client_create();
+		if((e.kind==UI_EFFECT_VOICE_START&&!cfg->companion_enabled)||!g_voice||
+		   voice_client_start(g_voice,cfg->companion_host,cfg->companion_port,cfg->companion_token,e.kind==UI_EFFECT_VOICE_TEST)){
+			if(e.kind==UI_EFFECT_VOICE_TEST)quick_ui_message(&g_ui,"配置无效或上一会话正在结束，请稍后重试");
+			else quick_ui_voice_update(&g_ui,VOICE_ERROR,NULL,g_ui.voice_revision,"请先启用连接并配置 Mac 地址与 64 位配对密钥");break;
+		}
+		g_voice_probe=e.kind==UI_EFFECT_VOICE_TEST;
+		if(g_voice_probe)g_voice_probe_target=e.target;
+		else{g_voice_target=e.target;g_voice_probe_target=0;g_voice_original_out=session_input_generation(s);}
+		break;}
+	case UI_EFFECT_VOICE_STOP:voice_client_stop(g_voice);break;
+	case UI_EFFECT_VOICE_PASTE:{
+		char *text=NULL;int n=get_clipboard_data("text/plain",&text);if(n>0&&text&&text[n-1]==0)n--;
+		if(n<=0||!text||quick_ui_voice_paste(&g_ui,text,(size_t)n))quick_ui_message(&g_ui,"剪贴板内容无效或过长");free(text);break;}
+	case UI_EFFECT_VOICE_INSERT:
+		if(e.target!=g_voice_target||g_voice_probe||session_id(app_active_session(g_app))!=e.target||
+		   session_input_generation(s)!=g_voice_original_out){
+			quick_ui_voice_update(&g_ui,VOICE_ERROR,NULL,g_ui.voice_revision,"终端输入已变化；请复制草稿后确认插入位置");
+			io_copy_to_clipboard(g_ui.voice_text,strlen(g_ui.voice_text));break;
+		}
+		if(strcmp(prefs->tty_encoding,"UTF-8")&&strcmp(prefs->tty_encoding,"utf-8")){
+			quick_ui_voice_update(&g_ui,VOICE_ERROR,NULL,g_ui.voice_revision,"语音输入需要 UTF-8 终端编码");break;
+		}
+		if(voice_commit_prepare(&g_voice_commit,g_ui.voice_text,ghostty_bridge_bracketed_paste(session_bridge(s)))){
+			quick_ui_voice_update(&g_ui,VOICE_ERROR,NULL,g_ui.voice_revision,"草稿为空、过长或含无效字符");break;
+		}
+		if(session_set_write_exclusive(s,1)){
+			quick_ui_voice_update(&g_ui,VOICE_READY,NULL,g_ui.voice_revision,"终端正在回复，请稍后再次插入");break;
+		}
+		g_voice_committing=1;g_voice_commit_target=e.target;
+		memcpy(g_voice_commit_text,g_ui.voice_text,strlen(g_ui.voice_text)+1);
+		clock_gettime(CLOCK_MONOTONIC,&g_voice_commit_started);break;
+	case UI_EFFECT_MODE_NORMAL:session_set_profile(s,TERM_PROFILE_TERMINAL);break;
+	case UI_EFFECT_MODE_INSERT:session_set_profile(s,TERM_PROFILE_TTY);break;
+	case UI_EFFECT_CLOUD:session_set_profile(s,TERM_PROFILE_CLAUDE);break;
+	case UI_EFFECT_INTERRUPT:
+		if(session_write_bytes(s,"\x03",1)!=1)platform_toast(g_platform,"中断发送失败");break;
+	case UI_EFFECT_PASTE:
+	case UI_EFFECT_EDITOR_PASTE:{
+		char *data=NULL;int n=get_clipboard_data("text/plain",&data);
+		if(n<=0||!data){platform_toast(g_platform,"剪贴板没有文本");free(data);break;}
+		if(data[n-1]==0)n--;
+		if(e.kind==UI_EFFECT_EDITOR_PASTE){
+			if(quick_ui_editor_paste(&g_ui,data,(size_t)n))quick_ui_message(&g_ui,"剪贴板内容无效或过长");
+		}else if(n>16384||memchr(data,0,(size_t)n)){
+			platform_toast(g_platform,"剪贴板过长或包含无效字符");
+		}else if(session_write_bytes(s,data,(size_t)n)!=n){
+			platform_toast(g_platform,"粘贴未完整写入，请检查输入行");
+		}
+		free(data);break;}
+	case UI_EFFECT_TAB_NEW:{
+		action_t a={.kind=TERM_ACTION_BUILTIN};a.as.builtin.id=TERM_BUILTIN_TAB_NEW;
+		app_dispatch_action(g_app,&a);break;}
+	case UI_EFFECT_TAB_SELECT:{
+		unsigned index;if(app_session_index_of(g_app,s,&index)){app_session_select_index(g_app,index);tab_overlay_set(1);}break;}
+	case UI_EFFECT_BINDINGS:help_overlay_build();current_help_overlay=1;break;
+	default:break;
+	}
+	ui_sync();mark_screen_dirty(1);
+}
+
+static uint64_t voice_shortcut_now(void){
+	struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);
+	return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000;
+}
+static int voice_shortcut_eligible(session_t *s){
+	return s&&!session_is_exited(s)&&g_ui_initialized&&g_ui.page==UI_CLOSED&&
+	    !g_voice_committing&&!current_help_overlay&&!url_pick_active()&&
+	    !kbd.metamode&&!kbd.current_symmenu&&!current_modmask()&&!modal_kbd.prefix&&g_drag.mode==DRAG_IDLE;
+}
+static uint64_t voice_shortcut_generation(session_t *s){
+	return s?(session_input_generation(s)<<2)^(uint64_t)session_input_mode(s):0;
+}
+static void voice_shortcut_result(app_t *app,int result){
+	if(result&VOICE_SHORTCUT_REPLAY){
+		key_event_t key=g_voice_shortcut.down;
+		app_handle_key(app,&key);key.pressed=0;key.repeat=0;app_handle_key(app,&key);
+	}
+	if(result&VOICE_SHORTCUT_TRIGGER){
+		ui_sync();
+		if(quick_ui_voice_shortcut(&g_ui)){ui_reset_transients();ui_apply_effect();mark_screen_dirty(1);}
+	}
+	if(g_voice_shortcut.pending)platform_set_idle_timeout(g_platform,50);
+	else if(!g_voice_target&&!g_voice_probe&&!g_voice_committing&&g_drag.mode==DRAG_IDLE)
+		platform_set_idle_timeout(g_platform,PLATFORM_IDLE_TIMEOUT_MS_DEFAULT);
+}
+static void voice_shortcut_pump(app_t *app){
+	if(!g_voice_shortcut.pending)return;
+	session_t *s=app_active_session(app);
+	voice_shortcut_result(app,voice_shortcut_tick(&g_voice_shortcut,session_id(s),
+	    voice_shortcut_generation(s),voice_shortcut_eligible(s),voice_shortcut_now()));
+}
+
 int app_handle_event(app_t *app, const event_t *event) {
 	if (event == NULL) {
 		return 0;
+	}
+	if(event->type==TERM_EVENT_KEY){
+		session_t *s=app_active_session(app);
+		int result=voice_shortcut_key(&g_voice_shortcut,&event->as.key,session_id(s),
+		    voice_shortcut_generation(s),voice_shortcut_eligible(s),voice_shortcut_now());
+		voice_shortcut_result(app,result);
+		if(result&VOICE_SHORTCUT_CONSUME)return 1;
+	}else if(event->type==TERM_EVENT_TOUCH_DOWN||event->type==TERM_EVENT_INVOKE||
+	    (event->type==TERM_EVENT_ACTIVATE&&!event->as.activate.active)){
+		voice_shortcut_cancel(&g_voice_shortcut);
+	}
+	if(g_ui_initialized){
+		ui_sync();ui_page_t before=g_ui.page;
+		if(quick_ui_event(&g_ui,event)){
+			if(before!=g_ui.page||event->type==TERM_EVENT_TOUCH_DOWN)ui_reset_transients();
+			if(event->type==TERM_EVENT_KEY&&!event->as.key.pressed){
+				int sym=event->as.key.sym;
+				if(sym>0&&sym<65536)modal_kbd.blocked[sym>>3]&=~(1u<<(sym&7));
+			}
+			ui_apply_effect();if(g_ui.dirty)mark_screen_dirty(1);return 1;
+		}
 	}
 
 	switch (event->type) {
@@ -3114,7 +3532,7 @@ int app_handle_event(app_t *app, const event_t *event) {
 			mark_screen_dirty(1);
 			return 1;
 		}
-		if (event->as.key.pressed) {
+		if (event->as.key.pressed && session_input_mode(app_active_session(app)) == TERM_INPUT_INSERT) {
 			/* Snap viewport to live bottom so the keystroke isn't typed into history. */
 			ghostty_bridge_scroll_to_bottom(session_bridge(app_active_session(app)));
 		}
@@ -3247,6 +3665,10 @@ int app_handle_event(app_t *app, const event_t *event) {
 		drag_reset();
 		return 1;
 	case TERM_EVENT_ACTIVATE:
+		if(!event->as.activate.active&&(g_voice_target||g_voice_probe)&&!g_voice_committing){
+			voice_client_cancel(g_voice);g_voice_target=g_voice_probe_target=0;g_voice_probe=0;
+			quick_ui_voice_update(&g_ui,VOICE_ERROR,NULL,g_ui.voice_revision,"应用离开前台，本次语音已停止");
+		}
 		handle_activeevent(event->as.activate.active, event->as.activate.state);
 		return 1;
 	case TERM_EVENT_INVOKE:
@@ -3314,6 +3736,13 @@ int main(int argc, char **argv) {
 	 * SCREEN_IDLE_NORMAL when setting SCREEN_PROPERTY_IDLE_MODE). */
 	int lua_cfg_existed = (access(PREFS_LUA_FILE_PATH, F_OK) == 0);
 	prefs = prefs_lua_load(PREFS_LUA_FILE_PATH);
+	{
+		ui_settings_t settings;const char *sandbox=getenv("SANDBOX");
+		if(sandbox)snprintf(g_ui_settings_dir,sizeof(g_ui_settings_dir),"%s/data/settings",sandbox);
+		if(ui_settings_load(g_ui_settings_dir,&settings))
+			fprintf(stderr,"UI settings unavailable; using defaults\n");
+		quick_ui_init(&g_ui,&settings);memset(&settings,0,sizeof(settings));g_ui_initialized=1;
+	}
 	if (!lua_cfg_existed) {
 		prefs_first_run_readme();
 		prefs_emit_lua_stub(PREFS_LUA_FILE_PATH);
@@ -3379,6 +3808,7 @@ int main(int argc, char **argv) {
 
 	/* Initialize pty — opens the master, forks the shell, parks the fd on
 	 * the active session. */
+	if(g_ui.saved.default_profile>=0)session_set_profile(app_active_session(g_app),(term_profile_t)g_ui.saved.default_profile);
 	if (TERM_SUCCESS != pty_init(app_active_session(g_app))) {
 		PRINT(stderr, "Unable to initialize pty/tty\n");
 		app_shutdown();
@@ -3431,6 +3861,28 @@ int main(int argc, char **argv) {
 		/* Same safe point: deferred control-socket `eval` runs the
 		 * lua_State here, never from inside a client io_handler. */
 		control_drain_deferred();
+		voice_shortcut_pump(g_app);
+		voice_tick();
+		voice_screen_awake_sync();
+		int replies_pending=0;
+		for(unsigned vi=0;vi<app_session_count(g_app);vi++){
+			int vr=session_flush_replies(app_session_at(g_app,vi));
+			if(vr==0)replies_pending=1;
+			else if(vr<0)platform_toast(g_platform,"终端查询回复发送失败");
+		}
+		if(replies_pending)platform_set_idle_timeout(g_platform,50);
+		else if(g_reply_waiting&&!g_voice_target&&!g_voice_probe&&g_drag.mode==DRAG_IDLE&&!modal_kbd.hold_key)
+			platform_set_idle_timeout(g_platform,PLATFORM_IDLE_TIMEOUT_MS_DEFAULT);
+		g_reply_waiting=replies_pending;
+		ui_sync();
+		int completion_was_active=g_ui_painter.complete_ms!=0;
+		ui_painter_voice_tick(&g_ui_painter,&g_ui,voice_shortcut_now(),voice_client_audio_level(g_voice));
+		if(g_ui_painter.complete_ms)platform_set_idle_timeout(g_platform,50);
+		else if(completion_was_active&&!g_voice_target&&!g_voice_probe&&!g_voice_committing&&
+		    !g_reply_waiting&&g_drag.mode==DRAG_IDLE&&!modal_kbd.hold_key&&!g_voice_shortcut.pending)
+			platform_set_idle_timeout(g_platform,PLATFORM_IDLE_TIMEOUT_MS_DEFAULT);
+		if(g_ui.dirty)mark_screen_overlay_dirty();
+		if (modal_view_update(&modal_view, g_app)) mark_screen_dirty(1);
 		if (screen_dirty) {
 			int force_full = screen_full_dirty;
 			screen_dirty = 0;

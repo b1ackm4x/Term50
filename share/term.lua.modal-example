@@ -1,0 +1,31 @@
+-- Optional Claude Code workflow. Copy/merge into ~/.term.lua; not loaded by
+-- Term50 automatically. Commands are editable examples, not core features.
+prefs_version = 11
+default_input_mode = "normal"
+normal_insert_hold_enabled = true
+normal_insert_hold_key = "space"
+
+normal_keys = {
+  { "i", "mode_insert", label = "Insert" },
+  { "g", "/goal ", next_mode = "insert", label = "Goal prompt" },
+  { "b", "/btw ", next_mode = "insert", label = "Side prompt" },
+  { "r", "/resume\r", label = "Resume" },
+  { "w", "/rewind\r", label = "Rewind" },
+  { "d", "/diff\r", label = "Diff" },
+  { "t", "/tasks\r", label = "Tasks" },
+  { "x", "\x03", label = "Interrupt" },
+  { "q", "/exit", label = "Prefill exit (no Enter)" },
+  { "h", "tab_prev" },
+  { "l", "tab_next" },
+  { "n", "tab_new" },
+  { "?", "help_overlay" },
+}
+
+chord_bindings = {
+  { key = "sym", mods = { "shift" }, action = "mode_toggle",
+    label = "Shift+Sym = Normal/Insert" },
+  -- A real Escape byte even when Shift+Sym is used for modes. On Q20,
+  -- tap Alt, then Sym. Physical/external Esc also remains unchanged.
+  { key = "sym", mods = { "alt" }, action = "\x1b",
+    label = "Alt+Sym = Esc" },
+}

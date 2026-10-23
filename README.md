@@ -1,73 +1,75 @@
 # Term50
 
-Term50 is a terminal emulator for BlackBerry 10.
-It uses `libghostty-vt` as its terminal parser/state model and renders the visible grid directly through the BB10 Screen API + FreeType.
-It runs multiple shells as tabs, and is configured and scripted in Lua (`~/.term.lua`).
+Term50 is a terminal emulator for BlackBerry 10 (OS 10.3+). It uses
+`libghostty-vt` for terminal state, renders through the BB10 Screen API and
+FreeType, and runs a separate shell and scrollback for each tab. Lua configures
+keys and terminal actions in `~/.term.lua`.
 
-The [current release](https://github.com/acmiyaguchi/Term50/releases) requires OS version >= 10.3.
+[Features](#features) · [Voice input](#voice-input) · [Build and test](#build-and-test) · [Documentation](#documentation)
 
-## Building
+The [upstream releases](https://github.com/acmiyaguchi/Term50/releases) are
+separate from this working tree's newer voice and input features.
 
-You need the BlackBerry 10 NDK (for `qcc` and the packager) and Nix (for the bbnix userland, bundled Fen CLI, and bundled font staging).
-Everything links against headers + libraries that ship with the NDK (`libscreen`, `libbps`, `libfreetype`, `libicu*`, `libclipboard`); there are no vendored ARM prebuilts.
+## Features
 
-Third-party source lives under `vendor/` as submodules (libghostty-vt, Lua 5.4).
-After cloning:
+- Multiple PTY tabs with a touch tab strip, floating controls, and per-tab
+  Terminal, Claude, or tty shortcut profiles.
+- Chinese font fallback and two-column character rendering while the selected
+  terminal font retains control of Latin text and the cell grid.
+- Optional NORMAL/INSERT keyboard modes, configurable Lua bindings, and a
+  built-in help overlay. Existing users start in INSERT.
+- An in-sandbox `termctl` control socket and a `term://` invoke target for
+  automation.
+- Zsh history picker and Oh My Zsh integration scripts for the Q20 shell.
+
+See the [Lua configuration reference](share/term.lua.reference) for settings
+and the [modal input guide](docs/modal-input.md) for Q20 key behavior.
+
+## Voice input
+
+On a Q20, Term50 captures microphone audio and sends it over TLS-PSK to the
+macOS Companion. The Companion feeds the existing Doubao virtual microphone
+and returns full text snapshots, including revisions. Term50 shows an editable
+draft; confirming inserts it into the original tab without executing it.
+
+The Mac setup needs a logged-in desktop, the external `doubao-stream-bridge`
+environment, its virtual audio device, and Doubao. Start with the
+[phone usage guide](docs/voice-input.md) and [Mac Companion setup](companion/README.md).
+The connection test checks encrypted reachability; real recognition needs a
+separate audio test. The [validation record](docs/voice-development-validation.md)
+distinguishes host tests, Q20 tests, and real Doubao runs.
+
+## Build and test
+
+From the repository root, initialize the pinned Ghostty and Lua submodules and
+run the host checks:
 
 ```sh
 git submodule update --init --recursive
+make test check-reference
+make test-voice
 ```
 
-Compile the binaries (inside the BBNDK shell, e.g. `nix run .#shell` from the bbdev workspace):
+Host tests need a C compiler, ICU and OpenSSL development libraries,
+`pkg-config`, and Python 3.13+ with TLS-PSK for voice tests. They use synthetic
+audio and do not access a Q20 microphone or Doubao. See the
+[build guide](docs/building.md) for the validated Linux/amd64 BerryCore route,
+pinned ARM OpenSSL inputs, packaging, and the older NDK/Nix route. Complete
+BAR packaging needs external bbnix/Fen/font assets or a verified base BAR;
+building binaries alone does not install to a device.
 
-```sh
-make            # builds Term50 + termctl
-```
+## Documentation
 
-## Packaging & deploying
+| Topic | Guide |
+| --- | --- |
+| Voice on the phone | [Usage, behavior, and validation scope](docs/voice-input.md) |
+| Mac voice service | [Companion setup, checks, and protocol](companion/README.md) |
+| Native development | [Build, package, and deploy](docs/building.md) |
+| Keyboard input | [Modal input](docs/modal-input.md) · [Lua reference](share/term.lua.reference) |
+| Terminal rendering | [Chinese support](docs/chinese-support.md) |
+| Shell integration | [History picker](docs/history-picker.md) · [Oh My Zsh on Q20](docs/oh-my-zsh-q20.md) |
+| Automation | [`termctl` and `term://` reference](share/AGENTS.md) |
+| Voice internals | [Development validation](docs/voice-development-validation.md) · [TLS dependency](vendor/voice-openssl/README.md) |
 
-bbnix is a **required** dependency: it supplies the login shell (zsh), the terminfo database, and ssh/tmux/mosh.
-Term50 also bundles the BB10 Fen coding-agent CLI as `fen` on `$PATH`.
-The package targets stage bbnix, Fen, and the curated font bundle automatically, so they need Nix and a BB10 sysroot (`BBNIX_SYSROOT`); bbnix/Fen builds are impure.
-
-```sh
-export BBNIX_SYSROOT=/path/to/bbndk-linux
-make package-dev      # stage bbnix + Fen + fonts, build, package a dev-mode Term50.bar
-make deploy           # package-dev, then install + launch on the device
-```
-
-Device credentials for `deploy`/`connect` live in an untracked `.env` — copy `.env.example` to `.env` and set `BBIP`/`BBPASS`.
-
-## Distributing
-
-```sh
-make package-release  # optimized, non-devMode Term50.bar
-```
-
-BlackBerry's code-signing / BBID servers are gone, so the bar can't be signed.
-Distribute the unsigned release bar by **sideloading** (Sachesi, or `blackberry-deploy` to a device with Development Mode on).
-
-## Tabs
-
-Each tab owns its own pty, child shell, and Ghostty bridge (so its own scrollback); background tabs keep consuming output.
-Default tab keys sit under metamode (double-tap the metamode key — right shift by default — then a letter), mirroring tmux's window keys:
-
-| Metamode key | Action      | tmux analogue |
-|--------------|-------------|---------------|
-| `c`          | `tab_new`   | `prefix c`    |
-| `n`          | `tab_next`  | `prefix n`    |
-| `p`          | `tab_prev`  | `prefix p`    |
-| `x`          | `tab_close` | `prefix &`    |
-
-A one-row tab strip appears at the top when more than one tab is open (and flashes in on any tab action or top-edge tap); tap a numbered pill to jump to a tab or `+` to open one.
-All four actions are also callable from Lua, e.g. `term.action("tab_new")`.
-The app quits once the last tab is gone.
-
-## Configuration & control surface
-
-`~/.term.lua` configures keybindings and scripts the terminal; see `share/term.lua.reference` for the full reference.
-Term50 also exposes a `term://` URI invoke target and an in-sandbox control socket (`termctl`) for notifications and tab control — the bundled `share/AGENTS.md` (also at `$TERMCTL_AGENT_DOC` on-device) documents both surfaces.
-
-## See also
-
-* [Term48 in BlackBerry AppWorld](http://appworld.blackberry.com/webstore/content/26272878/)
+The app is licensed under [Apache 2.0](share/LICENSE). Third-party notices and
+licenses remain with their respective components.

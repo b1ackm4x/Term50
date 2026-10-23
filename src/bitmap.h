@@ -43,5 +43,7 @@ void bitmap_fill_rect(bitmap_t *dst, const rect_t *r, rgb_t color);
 /* Copy src into dst at (dx, dy). Both must be RGBA8888. Out-of-bounds rows
  * and columns are clipped silently. */
 void bitmap_blit(bitmap_t *dst, int dx, int dy, const bitmap_t *src);
+/* Straight-alpha source-over for UI only. Legacy terminal blits stay opaque. */
+void bitmap_blend(bitmap_t *dst, int dx, int dy, const bitmap_t *src);
 
 #endif /* BITMAP_H_ */

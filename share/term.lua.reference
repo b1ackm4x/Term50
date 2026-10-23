@@ -38,7 +38,25 @@
 -- "Scripting" section at the bottom for the Lua `term.*` API.
 -- ============================================================================
 
-prefs_version = 10
+prefs_version = 12
+
+normal_insert_hold_enabled = true
+-- Modal input is per tab. Reload changes defaults only for NEW tabs.
+-- NORMAL ignores unbound text; Enter/Esc/navigation/Ctrl still operate the terminal.
+default_input_mode = "insert"
+normal_insert_hold_key = "space"
+-- Hold uses the first repeat, never emits Space or Backspace.
+-- normal_keys merge like metamode_keys; false removes a binding.
+-- Optional label and next_mode = "insert" / "normal".
+-- next_mode applies to the originating tab only after success.
+-- mode_normal / mode_insert / mode_toggle also work via term.action
+-- and termctl action. Override Shift+Sym in your config to opt in:
+-- chord_bindings = {{key="sym", mods={"shift"}, action="mode_toggle"}}
+normal_keys = {
+  { "i", "mode_insert" },
+  { "?", "help_overlay" },
+}
+
 
 -- ----------------------------------------------------------------------------
 -- Scalars
@@ -62,14 +80,14 @@ auto_show_vkb = true
 
 -- Physical key that toggles metamode on a double-tap, and the max gap between
 -- the two taps (nanoseconds). Default key is right shift.
-metamode_doubletap_key = 18
+metamode_doubletap_key = 61666
 metamode_doubletap_delay = 500000000
 
 -- Allow key-HOLD to fire metamode actions / accent menus (see below).
 keyhold_actions = true
 
 -- Physical key that enters metamode while held down. Default is space.
-metamode_hold_key = 61
+metamode_hold_key = 32
 
 -- Let terminal apps resize the column count (vs locking to the device width).
 allow_resize_columns = false
@@ -112,7 +130,7 @@ metamode_hitbox = { 0, 0, 100, 100 }
 -- normally instead of triggering hold actions). Defaults: backspace, return.
 -- ----------------------------------------------------------------------------
 
-keyhold_actions_exempt = { 8, 13 }
+keyhold_actions_exempt = { 61448, 61453 }
 
 -- ----------------------------------------------------------------------------
 -- metamode_keys: tap the metamode key, then one of these letters. Each entry
@@ -283,3 +301,11 @@ function notify_return()
   term.notify{ id = "return", body = "Tap to return to Term50",
                uri = "term://focus" }
 end
+
+-- Terminal profile; Claude uses your existing normal_keys.
+terminal_keys = {
+  {"i", "kcuu1"}, {"j", "kcub1"}, {"k", "kcud1"}, {"l", "kcuf1"},
+  {"h", "tab_prev"}, {"n", "tab_new"}, {"?", "help_overlay"},
+  {"x", "\x03"}, {"v", "paste_clipboard"},
+  {"r", "\x12"}, -- Ctrl-R: history in the active local or SSH shell
+}

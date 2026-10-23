@@ -55,6 +55,8 @@ int term_runtime_ready(void);
 void setup_screen_size(int w, int h);
 void set_screen_cols(int cols);
 void app_shutdown(void);
+struct session;
+int send_session_keystrokes(struct session *s, const char *keystrokes);
 int send_metamode_keystrokes(const char* keystrokes);
 
 #define TERM_COLOR_BLACK      {.r = 0,   .g = 0,   .b = 0}

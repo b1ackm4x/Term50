@@ -84,3 +84,19 @@ void bitmap_blit(bitmap_t *dst, int dx, int dy, const bitmap_t *src) {
 		memcpy(drow, srow, row_bytes);
 	}
 }
+
+void bitmap_blend(bitmap_t *dst, int dx, int dy, const bitmap_t *src) {
+	if (!dst || !src || !dst->pixels || !src->pixels ||
+	    dst->fmt != BITMAP_FMT_RGBA8888 || src->fmt != BITMAP_FMT_RGBA8888) return;
+	int x0=dx<0?-dx:0, y0=dy<0?-dy:0;
+	int x1=src->w, y1=src->h;
+	if(dx+x1>dst->w)x1=dst->w-dx;
+	if(dy+y1>dst->h)y1=dst->h-dy;
+	for(int y=y0;y<y1;y++)for(int x=x0;x<x1;x++){
+		const uint8_t *s=src->pixels+(size_t)y*src->stride+x*4;
+		uint8_t *d=dst->pixels+(size_t)(dy+y)*dst->stride+(dx+x)*4;
+		unsigned a=s[3]; if(!a)continue;
+		for(int c=0;c<3;c++)d[c]=(s[c]*a+d[c]*(255-a)+127)/255;
+		d[3]=255;
+	}
+}

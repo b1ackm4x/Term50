@@ -6,6 +6,19 @@ INCLUDE += -I$(QNX_TARGET)/usr/include/freetype2
 # BB10 libraries
 LIBPATHS	:= -L$(QNX_TARGET)/armle-v7/lib
 LIBS    	:= -lbps -licui18n -licuuc -lscreen -lm -lfreetype -lclipboard -lsocket
+LIBS += -lasound -laudio_manager
+
+# Voice TLS uses the pinned bbnix OpenSSL 3 runtime. Explicit SONAME paths
+# prevent the linker's SDK search paths from selecting obsolete .so.2 libs.
+VOICE_OPENSSL := vendor/voice-openssl
+INCLUDE := -I$(VOICE_OPENSSL)/include $(INCLUDE)
+VOICE_SSL := $(VOICE_OPENSSL)/lib/libssl.so.3
+VOICE_CRYPTO := $(VOICE_OPENSSL)/lib/libcrypto.so.3
+VOICE_HEADERS := $(VOICE_OPENSSL)/include/openssl/ssl.h \
+                 $(VOICE_OPENSSL)/include/openssl/opensslv.h \
+                 $(VOICE_OPENSSL)/include/openssl/configuration.h
+LIBS += $(VOICE_SSL) $(VOICE_CRYPTO)
+LIBPATHS += -Wl,-rpath-link,$(VOICE_OPENSSL)/lib
 
 # Defines
 DEFINES := -D_FORTIFY_SOURCE=2 -D__PLAYBOOK__ -fstack-protector-strong
@@ -96,6 +109,13 @@ TEST_CC  ?= cc
 TEST_BIN := Device-Debug/test_chord_match
 test: $(TEST_BIN)
 	./$(TEST_BIN)
+	TEST_CC="$(TEST_CC)" ./tests/run_modal_tests.sh
+	$(TEST_CC) -std=gnu99 -g -Wall -Wextra $(TEST_SANITIZERS) -Itests/compat -Isrc tests/test_quick_ui.c src/quick_ui.c src/ui_settings.c src/bitmap.c -o Device-Debug/test_quick_ui
+	./Device-Debug/test_quick_ui
+
+.PHONY: test-voice
+test-voice:
+	sh tests/run_voice_tests.sh
 
 $(TEST_BIN): tests/test_chord_match.c src/chord_match.c src/chord.h src/action.h src/term_types.h
 	@mkdir -p $(dir $@)
@@ -123,9 +143,13 @@ $(GHOSTTY_A) $(GHOSTTY_H):
 
 $(BINARY): $(BINARY_PATH)
 
-$(BINARY_PATH): $(GHOSTTY_A) $(GHOSTTY_H) $(LUA_A) $(OBJS) $(QR_OBJS)
+$(BINARY_PATH): $(GHOSTTY_A) $(GHOSTTY_H) $(LUA_A) $(VOICE_SSL) $(VOICE_CRYPTO) $(OBJS) $(QR_OBJS)
 	mkdir -p $(ASSET)
 	$(CC) $(CFLAGS) $(LIBPATHS) $(LDOPTS) $(OBJS) $(QR_OBJS) $(LIBS) -o $(BINARY_PATH)
+
+# Header search flags alone do not invalidate an object previously compiled
+# against the SDK. Force that first migration to the generated OpenSSL 3 API.
+src/voice_client.o: $(VOICE_HEADERS) $(VOICE_OPENSSL)/pins.json
 
 # Client objects: no app DEFINES, but -Isrc so they find control_proto.h.
 $(CTL_DIR)/%.ctl.o: $(CTL_DIR)/%.c

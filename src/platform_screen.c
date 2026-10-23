@@ -441,6 +441,15 @@ static void screen_plat_set_idle_timeout(platform_t *p, int ms) {
 	self->poll_timeout_ms = ms;
 }
 
+static int screen_plat_set_screen_awake(platform_t *p, int awake) {
+	platform_screen_t *self = self_of(p);
+	if (self == NULL || self->window == NULL) {
+		return -1;
+	}
+	int mode = awake ? SCREEN_IDLE_MODE_KEEP_AWAKE : SCREEN_IDLE_MODE_NORMAL;
+	return screen_set_window_property_iv(self->window, SCREEN_PROPERTY_IDLE_MODE, &mode) == 0 ? 0 : -1;
+}
+
 static void screen_plat_destroy(platform_t *p) {
 	platform_screen_t *self = self_of(p);
 	if (self == NULL) {
@@ -467,6 +476,7 @@ static const platform_ops_t SCREEN_PLATFORM_OPS = {
 	.notify               = screen_plat_notify,
 	.open_url             = screen_plat_open_url,
 	.set_idle_timeout     = screen_plat_set_idle_timeout,
+	.set_screen_awake     = screen_plat_set_screen_awake,
 	.apply_pending_resize = screen_plat_apply_pending_resize,
 	.destroy              = screen_plat_destroy,
 };

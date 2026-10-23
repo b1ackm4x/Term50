@@ -82,7 +82,7 @@ static void gb_write_pty(GhosttyTerminal terminal, void *userdata,
                          const uint8_t *data, size_t len) {
   (void)terminal;
   if (data == NULL || len == 0) { return; }
-  session_write_bytes((session_t *)userdata, (const char *)data, len);
+  session_write_reply((session_t *)userdata, (const char *)data, len);
 }
 
 int ghostty_bridge_create(ghostty_bridge_t **out, uint16_t cols, uint16_t rows,
@@ -229,6 +229,7 @@ static void gb_init_cell(ghostty_bridge_cell_t *cell) {
   cell->inverse = 0;
   cell->invisible = 0;
   cell->wide_tail = 0;
+  cell->columns = 1;
 }
 
 static void gb_read_render_cell(ghostty_bridge_t *b,
@@ -267,6 +268,8 @@ static void gb_read_render_cell(ghostty_bridge_t *b,
         GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
         &raw) == GHOSTTY_SUCCESS) {
     ghostty_cell_get(raw, GHOSTTY_CELL_DATA_WIDE, &wide);
+    cell->columns = wide == GHOSTTY_CELL_WIDE_WIDE ? 2 :
+                    wide == GHOSTTY_CELL_WIDE_SPACER_TAIL ? 0 : 1;
     cell->wide_tail = (wide == GHOSTTY_CELL_WIDE_SPACER_TAIL ||
                        wide == GHOSTTY_CELL_WIDE_SPACER_HEAD) ? 1 : 0;
   }
@@ -443,6 +446,10 @@ static int gb_mode_on(ghostty_bridge_t *b, GhosttyMode mode) {
     return 0;
   }
   return v ? 1 : 0;
+}
+
+int ghostty_bridge_bracketed_paste(ghostty_bridge_t *b) {
+  return b && gb_mode_on(b, GHOSTTY_MODE_BRACKETED_PASTE);
 }
 
 int ghostty_bridge_mouse_wheel_ready(ghostty_bridge_t *b) {

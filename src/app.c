@@ -43,6 +43,7 @@ int app_init(app_t **out, const pref_t *prefs,
 		return -1;
 	}
 
+	session_set_input_mode(s, prefs ? prefs->default_input_mode : TERM_INPUT_INSERT);
 	app->sessions[0] = s;
 	app->count = 1;
 	app->active = 0;
@@ -136,6 +137,7 @@ int app_session_open(app_t *app, uint16_t cols, uint16_t rows,
 		return -1;
 	}
 
+	session_set_input_mode(s, app->prefs ? app->prefs->default_input_mode : TERM_INPUT_INSERT);
 	app->next_id++;
 	app->sessions[app->count] = s;
 	app->active = app->count;
@@ -167,6 +169,7 @@ void app_session_close_index(app_t *app, unsigned index) {
 		return;
 	}
 
+	if (index < app->active) --app->active;
 	if (app->active >= app->count) {
 		app->active = app->count - 1;
 	}

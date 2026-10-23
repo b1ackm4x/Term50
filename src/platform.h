@@ -42,6 +42,10 @@ typedef struct platform_ops {
 	 * touch arrow-pad gesture lowers it while armed so auto-repeat fires on a
 	 * motionless finger, then restores it. May be NULL (no-op). */
 	void (*set_idle_timeout)(platform_t *p, int ms);
+	/* Temporarily prevent automatic screen sleep, or restore normal sleep.
+	 * Does not override explicit backgrounding or change stored preferences.
+	 * Optional; 0 on success, -1 on failure or unsupported operation. */
+	int (*set_screen_awake)(platform_t *p, int awake);
 	/* Apply any pending window-geometry changes (rotation + size + render
 	 * buffer rebuild) stashed by next_event. Called from the main thread
 	 * during the TERM_EVENT_RESIZE handler, before the renderer's next
@@ -73,6 +77,7 @@ int  platform_open_url(platform_t *p, const char *url);
  * starts at and what callers restore to after transiently lowering it. */
 #define PLATFORM_IDLE_TIMEOUT_MS_DEFAULT 250
 void platform_set_idle_timeout(platform_t *p, int ms);
+int platform_set_screen_awake(platform_t *p, int awake);
 void platform_apply_pending_resize(platform_t *p);
 
 #endif
